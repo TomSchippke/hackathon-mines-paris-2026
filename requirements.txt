@@ -1,0 +1,17 @@
+openai>=1.50
+python-dotenv>=1.0
+bertopic>=0.16
+umap-learn>=0.5
+hdbscan>=0.8
+pandas>=2.2
+numpy>=1.26
+matplotlib>=3.9
+tqdm>=4.66
+reportlab>=4.2
+augraphy>=8.2
+pymupdf>=1.28
+img2pdf>=0.6
+pypdf>=6.0
+ipykernel>=6.29
+jupyter>=1.0
+nbformat>=5.10
