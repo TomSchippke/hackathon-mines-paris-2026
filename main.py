@@ -23,13 +23,14 @@ from pdf_pipeline import config as pdf_config
 from pdf_pipeline.pipeline import run as run_pdf
 from topic_modeling import config as topic_config
 from topic_modeling.pipeline import run as run_topics
+from agentic_pipeline.pipeline import run_agentic_segmentation
 
-STEPS = ["pdf", "topics"]
+STEPS = ["pdf", "topics", "segmentation", "webapp"]
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--steps", nargs="+", choices=STEPS, default=STEPS, help="étapes à lancer")
+    parser.add_argument("--steps", nargs="+", choices=STEPS, default=["pdf", "topics", "segmentation"], help="étapes à lancer")
     parser.add_argument("--csv", type=Path, default=pdf_config.DEFAULT_CSV, help="CSV des incidents")
     parser.add_argument("--out-dir", type=Path, default=Path("outputs"))
     parser.add_argument("--min-cluster-size", type=int, default=topic_config.MIN_CLUSTER_SIZE)
@@ -45,6 +46,19 @@ def main() -> None:
         elif step == "topics":
             run_topics(args.out_dir / "incidents_full.csv", args.out_dir, args.min_cluster_size,
                        split=True)
+        elif step == "segmentation":
+            incidents_file = args.out_dir / "incidents_full.csv"
+            if not incidents_file.exists():
+                incidents_file = Path("data/incidents_full.csv")
+            run_agentic_segmentation(
+                input_csv=incidents_file,
+                out_dir=args.out_dir / "segmentation",
+                min_cluster_size=args.min_cluster_size,
+                split_col="asset_type",
+            )
+        elif step == "webapp":
+            import subprocess
+            subprocess.run(["uv", "run", "streamlit", "run", "webapp/app.py"])
         print(f"-> étape {step} terminée en {time.time() - start:.0f} s")
 
 
