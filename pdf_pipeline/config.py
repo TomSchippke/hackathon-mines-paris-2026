@@ -6,9 +6,6 @@ DPI = 300
 # Sous ce nombre de caractères extraits, un PDF est considéré comme un scan (pas de couche texte).
 MIN_TEXT_CHARS = 50
 
-# Seuil de binarisation des images pour Tesseract : supprime le grain du papier scanné.
-BINARIZE_THRESHOLD = 140
-
 # Libellés du rapport, dans l'ordre d'apparition, et colonne correspondante du CSV.
 FIELD_LABELS = {
     "site": "Site",

@@ -1,6 +1,6 @@
 """Cache des lectures OCR, indexé par le contenu du PDF.
 
-Chaque lecture est stockée dans `<cache>/<moteur>/<sha1 du PDF>.json`. Conséquences :
+Chaque lecture est stockée dans `outputs/cache/ocr_doctr/<sha1 du PDF>.json`. Conséquences :
 - un nouveau PDF (nouvelle empreinte) est lu, un PDF déjà lu ne l'est jamais deux fois ;
 - un PDF modifié a une nouvelle empreinte, il est donc relu automatiquement ;
 - renommer un PDF ou changer son identifiant dans le CSV ne force pas de relecture.
@@ -18,8 +18,8 @@ def file_sha1(path: Path) -> str:
 
 
 class OcrCache:
-    def __init__(self, root: Path, engine: str):
-        self.dir = root / engine
+    def __init__(self, directory: Path):
+        self.dir = directory
         self.dir.mkdir(parents=True, exist_ok=True)
 
     def _file(self, sha1: str) -> Path:

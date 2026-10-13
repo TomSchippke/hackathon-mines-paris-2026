@@ -4,27 +4,18 @@
   1. Lecture du CSV : chaque ligne avec un `document_path` est un rapport PDF à extraire.
   2. Couche texte : un PDF digital est lu directement ; sans texte, c'est un scan.
   3. Référence : valeurs connues et plages de coût horaire, tirées des rapports sans OCR.
-  4. OCR des scans (lectures brutes mises en cache, indexées par le contenu du PDF) :
-       combined  (défaut) docTR sur tous les scans, Tesseract seulement là où docTR laisse
-                 un champ vide ou un coût/durée implausible ;
-       doctr     docTR seul ;
-       tesseract Tesseract seul (4 lectures + vote).
-  5. Nettoyage, validation et combinaison des lectures -> valeurs finales + avertissements.
+  4. OCR des scans avec docTR (lectures mises en cache, indexées par le contenu du PDF).
+  5. Découpage en champs, nettoyage, contrôles -> valeurs finales + avertissements.
   6. Écriture du CSV complet et récapitulatif.
 
 Usage :
-    python -m pdf_pipeline                     # moteur combined -> outputs/1_extraction/incidents_full.csv
-    python -m pdf_pipeline --engine doctr      # -> outputs/comparaison_ocr/incidents_full_doctr.csv
-    python -m pdf_pipeline --engine tesseract  # -> outputs/comparaison_ocr/incidents_full_tesseract.csv
-    python -m pdf_pipeline --force             # ignore le cache et relit tous les scans
+    python -m pdf_pipeline           # -> outputs/1_extraction/incidents_full.csv
+    python -m pdf_pipeline --force   # ignore le cache et relit tous les scans
 """
 
 from __future__ import annotations
 
 import argparse
-import os
-import shutil
-from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -32,14 +23,16 @@ import pandas as pd
 import pymupdf
 from tqdm import tqdm
 
-from . import ocr_tesseract
-from .cache import OcrCache, file_sha1
-from paths import CACHE_DIR, DATA_CSV, INCIDENTS_FULL, OCR_COMPARISON_DIR
+from paths import CACHE_DIR, DATA_CSV, INCIDENTS_FULL
 
+from .cache import OcrCache, file_sha1
 from .config import DPI, MIN_TEXT_CHARS
 from .ocr_doctr import DoctrReader
 from .parsing import split_fields
-from .resolve import build_reference, combine, final_warnings, needs_fallback, resolve_reading
+from .validation import build_reference, extract_fields
+
+# Même dossier que les versions précédentes : les lectures déjà faites sont réutilisées.
+OCR_CACHE_DIR = CACHE_DIR / "ocr_doctr"
 
 
 @dataclass
@@ -48,15 +41,13 @@ class Report:
     path: Path
     site: str
     sha1: str = ""
-    text_layer: str | None = None  # texte du PDF digital ; None pour un scan
+    text: str | None = None       # texte du rapport : couche texte (digital) ou lecture docTR (scan)
+    method: str = ""              # text_layer | ocr_doctr
     error: str | None = None
 
 
-# --------------------------------------------------------------------------------------------
-# Étapes 1-2 : rapports à traiter, couche texte
-# --------------------------------------------------------------------------------------------
-
 def load_reports(df: pd.DataFrame, data_root: Path) -> list[Report]:
+    """Étapes 1-2 : rapports à traiter et couche texte des PDF digitaux."""
     reports = []
     for row in df[df["document_path"].notna()].itertuples():
         r = Report(int(row.incident_id), data_root / row.document_path,
@@ -65,160 +56,91 @@ def load_reports(df: pd.DataFrame, data_root: Path) -> list[Report]:
             r.sha1 = file_sha1(r.path)
             with pymupdf.open(r.path) as doc:
                 text = "\n".join(page.get_text() for page in doc)
-            r.text_layer = text if len(text.strip()) >= MIN_TEXT_CHARS else None
+            if len(text.strip()) >= MIN_TEXT_CHARS:
+                r.text, r.method = text, "text_layer"
         except Exception as e:  # fichier absent ou corrompu : signalé, n'arrête pas la pipeline
             r.error = f"{type(e).__name__}: {e}"
         reports.append(r)
     return reports
 
 
-# --------------------------------------------------------------------------------------------
-# Étape 4 : OCR avec cache
-# --------------------------------------------------------------------------------------------
-
-def split_cached(scans: list[Report], cache: OcrCache, force: bool) -> tuple[dict[str, dict], list[Report]]:
-    """Sépare les scans déjà lus (lecture prise dans le cache) de ceux à lire."""
-    out, todo = {}, []
+def ocr_scans(scans: list[Report], dpi: int, force: bool) -> int:
+    """Étape 4 : texte docTR de chaque scan, depuis le cache si déjà lu. Renvoie le nombre de
+    nouvelles lectures."""
+    cache = OcrCache(OCR_CACHE_DIR)
+    reader = DoctrReader(dpi)  # le modèle n'est chargé que s'il y a vraiment un scan à lire
+    todo = []
     for s in scans:
         reading = None if force else cache.get(s.sha1)
         if reading is None:
             todo.append(s)
         else:
-            out[s.sha1] = reading
-    return out, todo
-
-
-def doctr_readings(scans: list[Report], cache: OcrCache, dpi: int, force: bool) -> dict[str, dict]:
-    out, todo = split_cached(scans, cache, force)
-    reader = DoctrReader(dpi)  # le modèle n'est chargé que s'il y a vraiment un scan à lire
+            s.text, s.method = reading["texts"][0], "ocr_doctr"
     for s in tqdm(todo, desc="OCR docTR", disable=not todo):
         try:
-            out[s.sha1] = reader.read_scan(s.path)
-            cache.put(s.sha1, out[s.sha1])
+            reading = reader.read_scan(s.path)
+            cache.put(s.sha1, reading)
+            s.text, s.method = reading["texts"][0], "ocr_doctr"
         except Exception as e:
             s.error = f"docTR: {type(e).__name__}: {e}"
-    return out
+    return len(todo)
 
 
-def tesseract_readings(scans: list[Report], cache: OcrCache, dpi: int, force: bool,
-                       workers: int) -> dict[str, dict]:
-    out, todo = split_cached(scans, cache, force)
-    if todo and shutil.which("tesseract") is None:
-        raise SystemExit("Tesseract introuvable : `brew install tesseract tesseract-lang`.")
-    with ProcessPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(ocr_tesseract.read_scan, str(s.path), dpi): s for s in todo}
-        for future in tqdm(as_completed(futures), total=len(futures), desc="OCR Tesseract",
-                           disable=not todo):
-            s = futures[future]
-            try:
-                out[s.sha1] = future.result()
-                cache.put(s.sha1, out[s.sha1])
-            except Exception as e:
-                s.error = f"Tesseract: {type(e).__name__}: {e}"
-    return out
-
-
-# --------------------------------------------------------------------------------------------
-# Orchestration
-# --------------------------------------------------------------------------------------------
-
-def run(csv_path: Path, engine: str, dpi: int, force: bool, workers: int) -> Path:
+def run(csv_path: Path = DATA_CSV, dpi: int = DPI, force: bool = False) -> Path:
     data_root = csv_path.parent.parent  # les document_path sont relatifs à la racine du repo
     df = pd.read_csv(csv_path)
 
     # 1-2. Rapports PDF et couche texte
     reports = load_reports(df, data_root)
-    digital = [r for r in reports if r.text_layer is not None]
-    scans = [r for r in reports if r.text_layer is None and r.error is None]
-    for r in reports:
-        if not r.site:  # rapport ajouté sans site dans le CSV : on prend celui du PDF
-            r.site = split_fields(r.text_layer or "").get("site", "")
+    digital = [r for r in reports if r.text is not None]
+    scans = [r for r in reports if r.text is None and r.error is None]
     print(f"{len(reports)} PDF : {len(digital)} digitaux, {len(scans)} scans, "
           f"{sum(r.error is not None for r in reports)} illisibles")
 
-    # 3. Référence
-    ref = build_reference(df[df["document_format"] == "text"], [(r.text_layer, r.site) for r in digital])
+    # 3. Référence (rapports sans OCR)
+    for r in digital:
+        if not r.site:  # rapport ajouté sans site dans le CSV : on prend celui du PDF
+            r.site = split_fields(r.text).get("site", "")
+    ref = build_reference(df[df["document_format"] == "text"], [(r.text, r.site) for r in digital])
 
     # 4. OCR des scans
-    primary = "tesseract" if engine == "tesseract" else "doctr"
-    caches = {e: OcrCache(CACHE_DIR, f"ocr_{e}") for e in ("doctr", "tesseract")}
-    before = {e: len(c) for e, c in caches.items()}
-    if primary == "doctr":
-        readings = doctr_readings(scans, caches["doctr"], dpi, force)
-    else:
-        readings = tesseract_readings(scans, caches["tesseract"], dpi, force, workers)
+    new_readings = ocr_scans(scans, dpi, force)
 
     # 5. Valeurs finales
-    results: dict[int, tuple[dict, str, list[str]]] = {}
-    for r in digital:
-        reading = {"texts": [r.text_layer]}
-        fields, _ = resolve_reading(reading, r.site, ref)
-        results[r.incident_id] = (fields, "text_layer", final_warnings(fields, reading, r.site, ref))
-
-    resolved = {}
-    for s in scans:
-        if s.sha1 in readings:
-            if not s.site:
-                s.site = split_fields(readings[s.sha1]["texts"][0]).get("site", "")
-            resolved[s.sha1] = resolve_reading(readings[s.sha1], s.site, ref)
-
-    fallback = {}
-    if engine == "combined":
-        to_check = [s for s in scans if s.sha1 in resolved and needs_fallback(resolved[s.sha1][0], ref)]
-        if to_check:
-            print(f"{len(to_check)} scans à compléter avec Tesseract")
-        fallback = tesseract_readings(to_check, caches["tesseract"], dpi, force, workers)
-
-    for s in scans:
-        if s.sha1 not in resolved:
-            continue
-        fields, notes = resolved[s.sha1]
-        method = f"ocr_{primary}"
-        if s.sha1 in fallback:
-            fields, used = combine(fields, resolve_reading(fallback[s.sha1], s.site, ref)[0], ref)
-            if used:
-                method = "ocr_doctr+tesseract"
-        results[s.incident_id] = (fields, method, final_warnings(fields, readings[s.sha1], s.site, ref) + notes)
-
-    # 6. CSV complet
     full = df.set_index("incident_id")
     full["extraction_method"] = full["document_format"].map(lambda f: "csv" if f == "text" else "")
     full["extraction_warnings"] = ""
     for r in reports:
-        if r.error is not None and r.incident_id not in results:
+        if r.text is None:
             full.at[r.incident_id, "extraction_method"] = "error"
             full.at[r.incident_id, "extraction_warnings"] = f"erreur: {r.error}"
-    for incident_id, (fields, method, warnings) in results.items():
+            continue
+        if not r.site:
+            r.site = split_fields(r.text).get("site", "")
+        fields, warnings = extract_fields(r.text, r.site, ref)
         for col, value in fields.items():
-            full.at[incident_id, col] = value
-        full.at[incident_id, "extraction_method"] = method
-        full.at[incident_id, "extraction_warnings"] = " | ".join(warnings)
+            full.at[r.incident_id, col] = value
+        full.at[r.incident_id, "extraction_method"] = r.method
+        full.at[r.incident_id, "extraction_warnings"] = " | ".join(warnings)
     full = full.reset_index()
 
-    # Résultat principal dans 1_extraction/ ; les moteurs seuls ne servent qu'à la comparaison.
-    out_csv = INCIDENTS_FULL if engine == "combined" else OCR_COMPARISON_DIR / f"incidents_full_{engine}.csv"
-    out_csv.parent.mkdir(parents=True, exist_ok=True)
-    full.to_csv(out_csv, index=False)
-
-    # Récapitulatif
-    new = {e: len(c) - before[e] for e, c in caches.items()}
-    print(f"\nNouvelles lectures OCR : docTR {new['doctr']}, Tesseract {new['tesseract']} "
-          f"(cache : {CACHE_DIR}/)")
-    print(f"Sauvegardé : {out_csv} ({len(full)} lignes)")
+    # 6. CSV complet
+    INCIDENTS_FULL.parent.mkdir(parents=True, exist_ok=True)
+    full.to_csv(INCIDENTS_FULL, index=False)
+    print(f"\nNouvelles lectures docTR : {new_readings} (cache : {OCR_CACHE_DIR}/)")
+    print(f"Sauvegardé : {INCIDENTS_FULL} ({len(full)} lignes)")
     print("\nMéthode d'extraction :\n" + full["extraction_method"].value_counts().to_string())
     flagged = full[full["extraction_warnings"] != ""]
     print(f"\n{len(flagged)} rapports à vérifier (colonne extraction_warnings)")
     for row in flagged.head(20).itertuples():
         print(f"  incident {row.incident_id} : {row.extraction_warnings}")
-    return out_csv
+    return INCIDENTS_FULL
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--csv", type=Path, default=DATA_CSV)
-    parser.add_argument("--engine", choices=["combined", "doctr", "tesseract"], default="combined")
     parser.add_argument("--dpi", type=int, default=DPI, help="résolution de rendu des scans")
-    parser.add_argument("--workers", type=int, default=os.cpu_count(), help="processus Tesseract")
     parser.add_argument("--force", action="store_true", help="ignore le cache et relit tous les scans")
     args = parser.parse_args()
-    run(args.csv, args.engine, args.dpi, args.force, args.workers)
+    run(args.csv, args.dpi, args.force)

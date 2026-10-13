@@ -17,16 +17,6 @@ def normalize(s: str) -> str:
     return re.sub(r"\s+", " ", s).strip().lower()
 
 
-def words(text: str) -> list[str]:
-    return re.findall(r"[a-zàâäçéèêëîïôöùûüœ]+", text.lower())
-
-
-def text_quality(text: str | None, vocabulary: set[str]) -> float:
-    """Part des mots d'une description présents dans le vocabulaire des rapports sans OCR."""
-    w = words(text or "")
-    return sum(x in vocabulary for x in w) / len(w) if w else 0.0
-
-
 # --------------------------------------------------------------------------------------------
 # Découpage en champs
 # --------------------------------------------------------------------------------------------
