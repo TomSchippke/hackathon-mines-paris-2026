@@ -4,7 +4,7 @@
   1. Lecture de `outputs/1_extraction/incidents_full.csv` (sortie de pdf_pipeline).
   2. Embeddings Azure OpenAI des descriptions (cache : seuls les nouveaux textes sont envoyés).
   3. Un modèle BERTopic par type d'installation (PV / éolien) : UMAP -> HDBSCAN -> mots-clés.
-  4. Sorties dans outputs/2_topics/ :
+  4. Sorties dans outputs/exploration/topics/ (lancement manuel, hors pipeline principale) :
        incidents_topics.csv   chaque incident avec son topic ;
        topic_info.csv         chaque topic : taille, mots-clés, exemples représentatifs ;
        topics_par_site.csv    nombre d'incidents par topic et par site ;
@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from paths import CACHE_DIR, INCIDENTS_FULL, TOPICS_DIR
+from paths import CACHE_DIR, INCIDENTS_FULL, INCIDENTS_TOPICS, TOPIC_INFO, TOPICS_DIR
 
 from .config import FRENCH_STOPWORDS, MIN_CLUSTER_SIZE, NGRAM_RANGE, SPLIT_COLUMN, UMAP_PARAMS
 from .embeddings import embed_texts
@@ -101,8 +101,8 @@ def run(input_csv: Path, min_cluster_size: int, split: bool) -> Path:
     labels = dict(zip(info["topic_id"], info["topic_id"] + " : " + info["keywords"].str.split(", ").str[:4].str.join(", ")))
     result = df.merge(pd.concat(assigned), on="incident_id")
     result["topic_label"] = result["topic_id"].map(labels)
-    result.to_csv(topics_dir / "incidents_topics.csv", index=False)
-    info.to_csv(topics_dir / "topic_info.csv", index=False)
+    result.to_csv(INCIDENTS_TOPICS, index=False)
+    info.to_csv(TOPIC_INFO, index=False)
 
     by_site = pd.crosstab(result["topic_label"], result["site"])
     by_site["total"] = by_site.sum(axis=1)

@@ -6,10 +6,13 @@ de `outputs/1_extraction/incidents_full.csv` produit par `pdf_pipeline`.
 ## Utilisation
 
 ```bash
-python main.py                         # extraction des PDF puis topic modeling
-python main.py --steps topics          # topic modeling seul
+python -m topic_modeling                         # lancement seul, pour explorer
 python -m topic_modeling --min-cluster-size 15
 ```
+
+Dans la pipeline, l'agent d'analyse utilise les embeddings et les réglages UMAP de ce module, et
+choisit lui-même `min_cluster_size` (outil `run_clustering`). Le lancement seul ci-dessus garde des
+réglages fixes, pour explorer.
 
 Il faut le `.env` (Azure OpenAI) pour calculer les embeddings. Une fois en cache, plus aucun appel
 à l'API n'est fait.
@@ -24,7 +27,7 @@ Il faut le `.env` (Azure OpenAI) pour calculer les embeddings. Une fois en cache
 | 4. HDBSCAN | Forme les topics (au moins `min_cluster_size` incidents) ; les incidents isolés sont marqués `-1` (non classés). | Pas besoin de fixer le nombre de topics à l'avance. |
 | 5. Mots-clés | Mots et paires de mots fréquents dans un topic et rares ailleurs (c-TF-IDF). | Donne une première idée du thème de chaque topic. |
 
-## Sorties (`outputs/2_topics/`)
+## Sorties (`outputs/exploration/topics/`)
 
 | Fichier | Contenu |
 |---|---|

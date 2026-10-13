@@ -7,27 +7,27 @@ il se régénère avec `python main.py`, ou se partage directement entre membres
 outputs/
 ├── 1_extraction/            ← À UTILISER
 │   └── incidents_full.csv       les 1800 incidents, toutes colonnes remplies (PDF inclus)
-├── 2_topics/                ← À UTILISER
-│   ├── incidents_topics.csv     chaque incident avec son topic
-│   ├── topic_info.csv           chaque topic : taille, mots-clés, exemples
-│   ├── topics_par_site.csv      nombre d'incidents par topic et par site
-│   └── barchart_*.html          mots-clés des topics (à ouvrir dans un navigateur)
-├── cache/                   ← INTERNE, ne pas lire ni modifier
-│   ├── ocr_doctr/               lectures OCR brutes des scans (étape 1)
-│   ├── ocr_tesseract/           lectures OCR de secours (étape 1)
-│   └── embeddings/              vecteurs des descriptions, Azure OpenAI (étape 2)
-└── comparaison_ocr/         ← DOCUMENTATION des choix OCR, pas utilisé par la pipeline
-    ├── incidents_full_doctr.csv     extraction avec docTR seul
-    ├── incidents_full_tesseract.csv extraction avec Tesseract seul
-    └── verite_terrain_scans.csv     40 scans relus à la main
+├── 2_analyse/               ← À UTILISER
+│   ├── rapport_analyse.md       LE LIVRABLE : causes, profils de site, plan de remédiation
+│   ├── journal.md               toutes les décisions de l'agent (journal.json : version machine)
+│   ├── incidents_analyse.csv    chaque incident : cause, conséquence, leurs thèmes, action corrective
+│   ├── themes.csv               thèmes de causes et de conséquences nommés par l'agent
+│   ├── clustering_essais.csv    scores de chaque essai de clustering
+│   └── decisions.json           clusterings choisis et contenu du rapport
+├── 3_verification/          ← À UTILISER
+│   ├── verification.md          verdict, contrôles automatiques, constats du vérificateur
+│   └── journal.md               déroulé de la vérification
+├── exploration/             ← lancements manuels (python -m topic_modeling / cause_extraction)
+└── cache/                   ← INTERNE, ne pas lire ni modifier
+    ├── ocr_doctr/               lectures OCR brutes des scans (étape 1)
+    ├── embeddings/              vecteurs des descriptions, Azure OpenAI (étape 2)
+    └── llm/                     réponses du LLM (étapes 2 et 3)
 ```
 
-- **`1_extraction/` et `2_topics/`** : les résultats, numérotés dans l'ordre des étapes. C'est
+- **Dossiers numérotés** : les résultats, numérotés dans l'ordre des étapes. C'est
   ce qu'on lit dans un notebook ou une étape suivante.
-- **`cache/`** : évite de refaire le travail coûteux (≈ 30 min d'OCR, appels Azure payants). Le
+- **`cache/`** : évite de refaire le travail coûteux (≈ 30 min d'OCR, appels Azure payants, sessions de l'agent). Le
   supprimer ne casse rien mais force à tout recalculer. Pour éviter ce calcul à un coéquipier, lui
   envoyer ce dossier.
-- **`comparaison_ocr/`** : sert seulement à justifier le choix docTR + Tesseract
-  (`python -m pdf_pipeline.compare`, voir `pdf_pipeline/README.md`).
 
 L'organisation est définie dans `paths.py` (racine du repo).
