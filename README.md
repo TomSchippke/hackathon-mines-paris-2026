@@ -32,6 +32,20 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+## Lancer la pipeline
+
+```bash
+python main.py                    # toutes les étapes, l'une après l'autre
+python main.py --steps topics     # une seule étape
+```
+
+| Étape | Module | Sortie |
+|---|---|---|
+| 1. `pdf` : extraction des PDF (digitaux + scans) | [`pdf_pipeline/`](pdf_pipeline/README.md) | `outputs/incidents_full.csv` |
+| 2. `topics` : topic modeling BERTopic sur les 1800 incidents | [`topic_modeling/`](topic_modeling/README.md) | `outputs/topics/` |
+
+Chaque étape garde un cache dans `outputs/cache/` : relancer ne refait que ce qui a changé.
+
 ## Extraction des PDF (digitaux + scans)
 
 Les rapports `pdf_digital` et `pdf_scan` n'ont que `site` renseigné dans le CSV. La pipeline
