@@ -11,6 +11,7 @@ data/
 *.pkl
 *.pickle
 *.joblib
+*.npy
 
 # --- Python ---
 __pycache__/
@@ -28,7 +29,8 @@ env/
 .ipynb_checkpoints/
 
 # --- Sorties / modèles ---
-outputs/
+outputs/*
+!outputs/.gitkeep
 results/
 models/
 *.h5

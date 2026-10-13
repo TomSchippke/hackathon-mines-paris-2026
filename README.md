@@ -15,11 +15,13 @@ hackathon-mines-paris-2026/
 │   │   └── incident_XXXX.pdf
 │   └── pdf_scan/                # 600 PDF scannés (images, OCR nécessaire)
 │       └── incident_XXXX.pdf
-├── starterkit_students.ipynb
+├── notebooks/
+│   └── starterkit_students.ipynb
+├── outputs/                     # résultats générés (non versionnés), ex. incidents_full.csv
 └── ...
 ```
 
-Le notebook lit `data/incidents_students.csv` et les chemins `document_path` pointent vers
+Le notebook (dans `notebooks/`, il se place lui-même à la racine du repo) lit `data/incidents_students.csv` et les chemins `document_path` pointent vers
 `data/pdf_digital/` et `data/pdf_scan/` : ne renommez pas ces dossiers.
 
 ## Installation
