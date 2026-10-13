@@ -1,10 +1,10 @@
 """Topic modeling BERTopic sur tous les incidents (texte, PDF digitaux et scans).
 
 Étapes :
-  1. Lecture de `outputs/incidents_full.csv` (sortie de pdf_pipeline).
+  1. Lecture de `outputs/1_extraction/incidents_full.csv` (sortie de pdf_pipeline).
   2. Embeddings Azure OpenAI des descriptions (cache : seuls les nouveaux textes sont envoyés).
   3. Un modèle BERTopic par type d'installation (PV / éolien) : UMAP -> HDBSCAN -> mots-clés.
-  4. Sorties dans outputs/topics/ :
+  4. Sorties dans outputs/2_topics/ :
        incidents_topics.csv   chaque incident avec son topic ;
        topic_info.csv         chaque topic : taille, mots-clés, exemples représentatifs ;
        topics_par_site.csv    nombre d'incidents par topic et par site ;
@@ -22,8 +22,9 @@ from pathlib import Path
 
 import pandas as pd
 
-from .config import (DEFAULT_INPUT, DEFAULT_OUT_DIR, FRENCH_STOPWORDS, MIN_CLUSTER_SIZE,
-                     NGRAM_RANGE, SPLIT_COLUMN, UMAP_PARAMS)
+from paths import CACHE_DIR, INCIDENTS_FULL, TOPICS_DIR
+
+from .config import FRENCH_STOPWORDS, MIN_CLUSTER_SIZE, NGRAM_RANGE, SPLIT_COLUMN, UMAP_PARAMS
 from .embeddings import embed_texts
 
 
@@ -75,7 +76,7 @@ def fit_group(name: str, group: pd.DataFrame, embeddings, min_cluster_size: int,
     return assigned, info
 
 
-def run(input_csv: Path, out_dir: Path, min_cluster_size: int, split: bool) -> Path:
+def run(input_csv: Path, min_cluster_size: int, split: bool) -> Path:
     if not input_csv.exists():
         raise SystemExit(f"{input_csv} introuvable : lancer d'abord l'extraction des PDF "
                          "(python main.py ou python -m pdf_pipeline).")
@@ -83,9 +84,9 @@ def run(input_csv: Path, out_dir: Path, min_cluster_size: int, split: bool) -> P
     df = df[df["text"].notna()].reset_index(drop=True)
     print(f"{len(df)} incidents avec une description")
 
-    embeddings = embed_texts(df["text"].tolist(), out_dir / "cache")
+    embeddings = embed_texts(df["text"].tolist(), CACHE_DIR)
 
-    topics_dir = out_dir / "topics"
+    topics_dir = TOPICS_DIR
     topics_dir.mkdir(parents=True, exist_ok=True)
     groups = df.groupby(SPLIT_COLUMN).groups if split else {"all": df.index}
     print(f"BERTopic ({'un modèle par ' + SPLIT_COLUMN if split else 'un seul modèle'}, "
@@ -118,9 +119,8 @@ def run(input_csv: Path, out_dir: Path, min_cluster_size: int, split: bool) -> P
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--input", type=Path, default=DEFAULT_INPUT)
-    parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
+    parser.add_argument("--input", type=Path, default=INCIDENTS_FULL)
     parser.add_argument("--min-cluster-size", type=int, default=MIN_CLUSTER_SIZE)
     parser.add_argument("--no-split", action="store_true", help="un seul modèle pour PV et éolien")
     args = parser.parse_args()
-    run(args.input, args.out_dir, args.min_cluster_size, split=not args.no_split)
+    run(args.input, args.min_cluster_size, split=not args.no_split)

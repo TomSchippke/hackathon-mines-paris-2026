@@ -1,7 +1,7 @@
 # Topic modeling des incidents
 
 Regroupe les 1800 incidents (texte, PDF digitaux et scans) par thème avec **BERTopic**, à partir
-de `outputs/incidents_full.csv` produit par `pdf_pipeline`.
+de `outputs/1_extraction/incidents_full.csv` produit par `pdf_pipeline`.
 
 ## Utilisation
 
@@ -24,7 +24,7 @@ Il faut le `.env` (Azure OpenAI) pour calculer les embeddings. Une fois en cache
 | 4. HDBSCAN | Forme les topics (au moins `min_cluster_size` incidents) ; les incidents isolés sont marqués `-1` (non classés). | Pas besoin de fixer le nombre de topics à l'avance. |
 | 5. Mots-clés | Mots et paires de mots fréquents dans un topic et rares ailleurs (c-TF-IDF). | Donne une première idée du thème de chaque topic. |
 
-## Sorties (`outputs/topics/`)
+## Sorties (`outputs/2_topics/`)
 
 | Fichier | Contenu |
 |---|---|

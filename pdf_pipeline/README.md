@@ -1,7 +1,7 @@
 # Pipeline d'extraction des rapports PDF
 
 Dans `data/incidents_students.csv`, les 1200 rapports au format PDF n'ont que la colonne `site`
-de remplie. Cette pipeline lit les PDF et produit **`outputs/incidents_full.csv`** : les 1800
+de remplie. Cette pipeline lit les PDF et produit **`outputs/1_extraction/incidents_full.csv`** : les 1800
 incidents avec toutes les colonnes remplies (équipement, date, sévérité, durée, coût, météo,
 technicien, description).
 
@@ -10,10 +10,10 @@ technicien, description).
 ```bash
 pip install -r requirements.txt                 # dont python-doctr[torch]
 brew install tesseract tesseract-lang            # Linux : apt install tesseract-ocr tesseract-ocr-fra
-python -m pdf_pipeline                           # -> outputs/incidents_full.csv
+python -m pdf_pipeline                           # -> outputs/1_extraction/incidents_full.csv
 ```
 
-Puis dans le notebook : `df = pd.read_csv("outputs/incidents_full.csv")`.
+Puis dans le notebook : `df = pd.read_csv("outputs/1_extraction/incidents_full.csv")`.
 
 Premier lancement : ~30 min (OCR des 600 scans, GPU du Mac utilisé si disponible). Lancements
 suivants : quelques secondes, tout vient du cache.
@@ -66,16 +66,16 @@ c'est grâce à elles que le champ manquant de docTR a été détecté et compl�
 Pour refaire la comparaison :
 
 ```bash
-python -m pdf_pipeline --engine doctr        # -> outputs/incidents_full_doctr.csv
-python -m pdf_pipeline --engine tesseract    # -> outputs/incidents_full_tesseract.csv
+python -m pdf_pipeline --engine doctr        # -> outputs/comparaison_ocr/incidents_full_doctr.csv
+python -m pdf_pipeline --engine tesseract    # -> outputs/comparaison_ocr/incidents_full_tesseract.csv
 python -m pdf_pipeline.compare               # précision, désaccords, qualité des descriptions
 ```
 
-`outputs/verite_terrain_scans.csv` contient les valeurs relues à la main sur 40 scans tirés au hasard.
+`outputs/comparaison_ocr/verite_terrain_scans.csv` contient les valeurs relues à la main sur 40 scans tirés au hasard.
 
 ## Cache
 
-Les lectures OCR brutes sont sauvegardées dans `outputs/cache/<moteur>/<empreinte du PDF>.json`.
+Les lectures OCR brutes sont sauvegardées dans `outputs/cache/ocr_<moteur>/<empreinte du PDF>.json`.
 L'empreinte (SHA-1) est calculée sur le contenu du fichier :
 
 - un PDF déjà lu n'est jamais relu, même renommé ou avec un autre `incident_id` ;
@@ -85,7 +85,7 @@ L'empreinte (SHA-1) est calculée sur le contenu du fichier :
 
 `python -m pdf_pipeline --force` ignore le cache et relit tous les scans.
 
-`outputs/` est ignoré par git : pour partager les résultats, envoyer `outputs/incidents_full.csv`
+`outputs/` est ignoré par git : pour partager les résultats, envoyer `outputs/1_extraction/incidents_full.csv`
 (ou le dossier `outputs/cache/` pour éviter aux autres de refaire l'OCR).
 
 ## Organisation du code

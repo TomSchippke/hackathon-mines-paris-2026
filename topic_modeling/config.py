@@ -1,10 +1,5 @@
 """Paramètres du topic modeling."""
 
-from pathlib import Path
-
-DEFAULT_INPUT = Path("outputs/incidents_full.csv")  # produit par pdf_pipeline
-DEFAULT_OUT_DIR = Path("outputs")
-
 # Embeddings : appels Azure OpenAI par lots.
 EMBEDDING_BATCH_SIZE = 16
 

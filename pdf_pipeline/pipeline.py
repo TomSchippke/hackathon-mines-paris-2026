@@ -13,9 +13,9 @@
   6. Écriture du CSV complet et récapitulatif.
 
 Usage :
-    python -m pdf_pipeline                     # moteur combined -> outputs/incidents_full.csv
-    python -m pdf_pipeline --engine doctr      # -> outputs/incidents_full_doctr.csv
-    python -m pdf_pipeline --engine tesseract  # -> outputs/incidents_full_tesseract.csv
+    python -m pdf_pipeline                     # moteur combined -> outputs/1_extraction/incidents_full.csv
+    python -m pdf_pipeline --engine doctr      # -> outputs/comparaison_ocr/incidents_full_doctr.csv
+    python -m pdf_pipeline --engine tesseract  # -> outputs/comparaison_ocr/incidents_full_tesseract.csv
     python -m pdf_pipeline --force             # ignore le cache et relit tous les scans
 """
 
@@ -34,7 +34,9 @@ from tqdm import tqdm
 
 from . import ocr_tesseract
 from .cache import OcrCache, file_sha1
-from .config import DEFAULT_CSV, DEFAULT_OUT_DIR, DPI, MIN_TEXT_CHARS
+from paths import CACHE_DIR, DATA_CSV, INCIDENTS_FULL, OCR_COMPARISON_DIR
+
+from .config import DPI, MIN_TEXT_CHARS
 from .ocr_doctr import DoctrReader
 from .parsing import split_fields
 from .resolve import build_reference, combine, final_warnings, needs_fallback, resolve_reading
@@ -120,7 +122,7 @@ def tesseract_readings(scans: list[Report], cache: OcrCache, dpi: int, force: bo
 # Orchestration
 # --------------------------------------------------------------------------------------------
 
-def run(csv_path: Path, out_dir: Path, engine: str, dpi: int, force: bool, workers: int) -> Path:
+def run(csv_path: Path, engine: str, dpi: int, force: bool, workers: int) -> Path:
     data_root = csv_path.parent.parent  # les document_path sont relatifs à la racine du repo
     df = pd.read_csv(csv_path)
 
@@ -138,9 +140,8 @@ def run(csv_path: Path, out_dir: Path, engine: str, dpi: int, force: bool, worke
     ref = build_reference(df[df["document_format"] == "text"], [(r.text_layer, r.site) for r in digital])
 
     # 4. OCR des scans
-    cache_root = out_dir / "cache"
     primary = "tesseract" if engine == "tesseract" else "doctr"
-    caches = {e: OcrCache(cache_root, e) for e in ("doctr", "tesseract")}
+    caches = {e: OcrCache(CACHE_DIR, f"ocr_{e}") for e in ("doctr", "tesseract")}
     before = {e: len(c) for e, c in caches.items()}
     if primary == "doctr":
         readings = doctr_readings(scans, caches["doctr"], dpi, force)
@@ -194,14 +195,15 @@ def run(csv_path: Path, out_dir: Path, engine: str, dpi: int, force: bool, worke
         full.at[incident_id, "extraction_warnings"] = " | ".join(warnings)
     full = full.reset_index()
 
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_csv = out_dir / ("incidents_full.csv" if engine == "combined" else f"incidents_full_{engine}.csv")
+    # Résultat principal dans 1_extraction/ ; les moteurs seuls ne servent qu'à la comparaison.
+    out_csv = INCIDENTS_FULL if engine == "combined" else OCR_COMPARISON_DIR / f"incidents_full_{engine}.csv"
+    out_csv.parent.mkdir(parents=True, exist_ok=True)
     full.to_csv(out_csv, index=False)
 
     # Récapitulatif
     new = {e: len(c) - before[e] for e, c in caches.items()}
     print(f"\nNouvelles lectures OCR : docTR {new['doctr']}, Tesseract {new['tesseract']} "
-          f"(cache : {cache_root}/)")
+          f"(cache : {CACHE_DIR}/)")
     print(f"Sauvegardé : {out_csv} ({len(full)} lignes)")
     print("\nMéthode d'extraction :\n" + full["extraction_method"].value_counts().to_string())
     flagged = full[full["extraction_warnings"] != ""]
@@ -213,11 +215,10 @@ def run(csv_path: Path, out_dir: Path, engine: str, dpi: int, force: bool, worke
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--csv", type=Path, default=DEFAULT_CSV)
-    parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
+    parser.add_argument("--csv", type=Path, default=DATA_CSV)
     parser.add_argument("--engine", choices=["combined", "doctr", "tesseract"], default="combined")
     parser.add_argument("--dpi", type=int, default=DPI, help="résolution de rendu des scans")
     parser.add_argument("--workers", type=int, default=os.cpu_count(), help="processus Tesseract")
     parser.add_argument("--force", action="store_true", help="ignore le cache et relit tous les scans")
     args = parser.parse_args()
-    run(args.csv, args.out_dir, args.engine, args.dpi, args.force, args.workers)
+    run(args.csv, args.engine, args.dpi, args.force, args.workers)

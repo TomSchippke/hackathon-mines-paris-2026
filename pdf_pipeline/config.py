@@ -1,10 +1,5 @@
 """Paramètres de la pipeline : format des rapports et réglages OCR."""
 
-from pathlib import Path
-
-DEFAULT_CSV = Path("data/incidents_students.csv")
-DEFAULT_OUT_DIR = Path("outputs")
-
 # Résolution de rendu des pages scannées avant OCR.
 DPI = 300
 

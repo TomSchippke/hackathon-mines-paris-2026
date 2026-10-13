@@ -1,13 +1,13 @@
 """Compare plusieurs extractions des scans (sorties de la pipeline avec différents moteurs).
 
-- précision champ par champ sur les scans relus à la main (`outputs/verite_terrain_scans.csv`) ;
+- précision champ par champ sur les scans relus à la main (`outputs/comparaison_ocr/verite_terrain_scans.csv`) ;
 - désaccords entre les deux premiers fichiers, scan par scan ;
 - qualité des descriptions : part des mots présents dans les rapports sans OCR ;
 - nombre de rapports signalés dans `extraction_warnings`.
 
 Usage :
     python -m pdf_pipeline.compare
-    python -m pdf_pipeline.compare outputs/incidents_full_tesseract.csv outputs/incidents_full_doctr.csv
+    python -m pdf_pipeline.compare outputs/comparaison_ocr/incidents_full_tesseract.csv outputs/comparaison_ocr/incidents_full_doctr.csv
 """
 
 from __future__ import annotations
@@ -17,12 +17,14 @@ from pathlib import Path
 
 import pandas as pd
 
+from paths import INCIDENTS_FULL, OCR_COMPARISON_DIR, OCR_GROUND_TRUTH
+
 from .parsing import text_quality, words
 
 FIELDS = ["equipment_id", "date", "severity", "downtime_hours", "estimated_cost_eur",
           "weather_condition", "technician_id"]
-DEFAULT_FILES = ["outputs/incidents_full_tesseract.csv", "outputs/incidents_full_doctr.csv",
-                 "outputs/incidents_full.csv"]
+DEFAULT_FILES = [OCR_COMPARISON_DIR / "incidents_full_tesseract.csv",
+                 OCR_COMPARISON_DIR / "incidents_full_doctr.csv", INCIDENTS_FULL]
 
 
 def same(a: pd.Series, b: pd.Series) -> pd.Series:
@@ -33,7 +35,7 @@ def same(a: pd.Series, b: pd.Series) -> pd.Series:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("files", nargs="*", default=DEFAULT_FILES)
-    parser.add_argument("--truth", type=Path, default=Path("outputs/verite_terrain_scans.csv"))
+    parser.add_argument("--truth", type=Path, default=OCR_GROUND_TRUTH)
     args = parser.parse_args()
 
     files = [Path(f) for f in args.files if Path(f).exists()]
