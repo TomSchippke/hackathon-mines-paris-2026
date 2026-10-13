@@ -44,3 +44,11 @@ models/
 *.log
 *.swp
 Thumbs.db
+
+# --- Archives ---
+*.zip
+
+# --- uv (setup local, le groupe utilise requirements.txt) ---
+pyproject.toml
+uv.lock
+src/
