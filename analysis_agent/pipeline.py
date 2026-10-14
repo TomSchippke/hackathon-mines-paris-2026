@@ -38,6 +38,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import re
 
 import pandas as pd
 
@@ -45,7 +46,7 @@ from llm.agent import dispatch, journal_markdown, run_agent
 from paths import ANALYSIS_DIR, ANALYSIS_JOURNAL, ANALYSIS_REPORT, INCIDENTS_FULL
 
 from . import facts as F
-from .config import (MIN_CHOSEN_DBCV, ASSET_LABELS, ASSET_TYPES, DIMENSION_LABELS, DIMENSIONS, PHASE_CLUSTERING,
+from .config import (CONSEQUENCE_WORDS, MIN_CHOSEN_DBCV, ASSET_LABELS, ASSET_TYPES, DIMENSION_LABELS, DIMENSIONS, PHASE_CLUSTERING,
                      PHASE_PRIORITIES, PHASE_PROFILES, PHASE_THEMES, PRIORITY_CHAINS_RANGE, ROLE, SITE_PROFILES, TURNS)
 from .report import export, render
 from .tools import TOOLS, AnalysisWorkspace
@@ -110,12 +111,31 @@ def fallback_themes(ws: AnalysisWorkspace, asset_type: str, dimension: str) -> l
     column = "categorie_consequence" if dimension == "consequence" else "facteur_principal"
     missing = ws.unthemed(asset_type, dimension)
     for t in missing:
-        values = ws.causes.loc[run["positions"][run["labels"] == t], column].value_counts()
-        name = f"{values.index[0]} ({', '.join(run['keywords'][t][:2])})" if len(values) else ", ".join(run["keywords"][t][:3])
-        dispatch(ws.tools, "define_themes", {"asset_type": asset_type, "dimension": dimension, "themes": [{
-            "name": name[:60], "topics": [t],
-            "description": f"Thème automatique : {column.replace('_', ' ')} dominant(e) du cluster et mots-clés.",
-            "justification": "THÈME AUTOMATIQUE par le code : l'agent n'a pas rangé ce cluster."}]})
+        all_values = ws.causes.loc[run["positions"][run["labels"] == t], column].value_counts()
+        values = all_values.drop(index=["indéterminé"], errors="ignore")
+        # Mots-clés utilisables dans un nom de cause : sans mot de conséquence (« feu », « arrêt »...).
+        keywords = [k for k in run["keywords"][t] if dimension != "cause"
+                    or not (re.search(CONSEQUENCE_WORDS, k, re.I) or k.split()[0] == "départ")]
+        # Noms candidats, du plus précis au plus simple : le premier accepté par define_themes est gardé (un nom
+        # de cause contenant un mot de conséquence, « arrêt », « production »..., est refusé).
+        # Nom court : le facteur (ou la catégorie) seul ; un mot-clé distinctif s'il est déjà pris par un autre thème.
+        # Si la majorité du cluster a un facteur « indéterminé », l'origine n'est pas établie : on le dit plutôt
+        # que de nommer le cluster d'après un facteur minoritaire.
+        taken = {th["name"].lower() for th in ws.themes.values()
+                 if th["asset_type"] == asset_type and th["dimension"] == dimension}
+        established = len(values) and values.sum() >= 0.5 * all_values.sum()
+        base = values.index[0].capitalize() if established else ("Origine non établie" if dimension == "cause" else "")
+        distinct = [k for k in keywords if k.lower() not in base.lower()][:1]
+        candidates = ([base] if base and base.lower() not in taken else []) \
+            + ([f"{base} – {distinct[0]}"] if base and distinct else []) \
+            + [", ".join(keywords[:3]).capitalize(), f"Groupe de {DIMENSION_LABELS[dimension]} {t}"]
+        for name in candidates:
+            result = dispatch(ws.tools, "define_themes", {"asset_type": asset_type, "dimension": dimension, "themes": [{
+                "name": name[:60], "topics": [t],
+                "description": f"Thème automatique : {column.replace('_', ' ')} dominant(e) du cluster et mots-clés.",
+                "justification": "THÈME AUTOMATIQUE par le code : l'agent n'a pas rangé ce cluster."}]})
+            if result.get("ok") and result["resultats"][0]["ok"]:
+                break
     return missing
 
 

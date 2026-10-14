@@ -101,6 +101,14 @@ def check_text(value, name: str, max_chars: int = 3000) -> str:
     return value.strip()
 
 
+def split_by(dominant: dict[int, str]) -> str:
+    """Regroupement proposé dans un refus de fusion : « défaut électrique -> clusters [0, 3] ; usure -> [6] »."""
+    groups: dict[str, list[int]] = {}
+    for topic, value in dominant.items():
+        groups.setdefault(value, []).append(topic)
+    return " ; ".join(f"« {value} » -> clusters {topics}" for value, topics in groups.items())
+
+
 def quality_problems(stability: float, unclassified: float, n_topics: int) -> list[str]:
     """Seuils de qualité non respectés par un essai de clustering (liste vide = conforme)."""
     problems = []
@@ -392,8 +400,12 @@ class AnalysisWorkspace:
                     raise ToolError("chaque thème doit être un objet {name, topics, description, justification}")
                 name = check_text(theme.get("name"), "name", MAX_THEME_NAME_CHARS)
                 if dimension == "cause" and re.search(CONSEQUENCE_WORDS, name, re.IGNORECASE):
-                    raise ToolError(f"nom refusé : « {name} » décrit une conséquence (arrêt, perte, dégât...). Un thème "
-                                    "de cause ne nomme que la cause (ex. « Vent fort / tempête »).")
+                    raw = theme.get("topics") if isinstance(theme.get("topics"), list) else []
+                    hint = self.dominant(asset_type, dimension, np.isin(labels, [t for t in raw if t in known]))
+                    raise ToolError(f"nom refusé : « {name} » décrit une conséquence (arrêt, perte, dégât, feu...). Un "
+                                    "thème de cause ne nomme que ce qui a PROVOQUÉ l'incident"
+                                    + (f" : facteur dominant de ces clusters = « {hint} », par exemple « {hint.capitalize()} »."
+                                       if hint else " (ex. « Vent fort / tempête »)."))
                 description = str(theme.get("description") or "").strip()[:600]
                 justification = str(theme.get("justification") or "").strip()[:1500]
                 topics = list(dict.fromkeys(check_list(theme.get("topics"), 40, "topics")))
@@ -417,14 +429,14 @@ class AnalysisWorkspace:
                         if len(f):
                             dominant[t] = f.index[0]
                     if len(set(dominant.values())) > 1:
-                        raise ToolError(f"fusion refusée : ces clusters ont des facteurs principaux différents "
-                                        f"{dominant}. Fais un thème par facteur.")
+                        raise ToolError(f"fusion refusée : ces clusters ont des facteurs principaux différents. Fais un "
+                                        f"thème par facteur : {split_by(dominant)}.")
                 if len(topics) > 1 and dimension == "consequence":  # conséquences : même catégorie normalisée
                     dominant = {t: self.causes.loc[positions[labels == t], "categorie_consequence"].mode().iat[0]
                                 for t in topics}
                     if len(set(dominant.values())) > 1:
-                        raise ToolError(f"fusion refusée : ces clusters ont des catégories de conséquence différentes "
-                                        f"{dominant}. Ne réunis que des clusters de même catégorie.")
+                        raise ToolError(f"fusion refusée : ces clusters ont des catégories de conséquence différentes. "
+                                        f"Fais un thème par catégorie : {split_by(dominant)}.")
                 if len(topics) > 1 and dimension == "cause":  # causes : les phrases réunies doivent rester semblables
                     reference = np.average([self.cohesion(vectors[labels == t]) for t in topics],
                                            weights=[(labels == t).sum() for t in topics])
