@@ -38,7 +38,13 @@ pip install -r requirements.txt
 python main.py                                # toutes les étapes, l'une après l'autre
 python main.py --steps analyse verification   # seulement certaines étapes
 python main.py --steps webapp                 # tableau de bord Streamlit (à la demande)
+python main.py --steps export                 # rapport interactif en un fichier HTML, à envoyer
 ```
+
+**Partager le rapport** : `outputs/2_analyse/rapport_interactif.html` est un fichier unique (~6 Mo, plotly.js
+intégré) qui s'ouvre d'un double-clic dans un navigateur, sans Python ni connexion. Mêmes graphiques
+interactifs que la webapp ; les filtres sont remplacés par des sections dépliables (une heatmap par site,
+toutes les fiches de causes, tous les plans par site).
 
 ```
  1. pdf            PDF + CSV ──> incidents_full.csv (1800 incidents complets)
@@ -59,6 +65,7 @@ python main.py --steps webapp                 # tableau de bord Streamlit (à la
 | 1. `pdf` : extraction des PDF (digitaux + scans) | [`pdf_pipeline/`](pdf_pipeline/README.md) | `outputs/1_extraction/incidents_full.csv` |
 | 2. `analyse` : workflow d'analyse (causes, conséquences, thèmes, profils, priorisation, rapport) | [`analysis_agent/`](analysis_agent/README.md) | `outputs/2_analyse/rapport_analyse.md` |
 | 3. `verification` : agent vérificateur | [`review_agent/`](review_agent/README.md) | `outputs/3_verification/verification.md` |
+| `export` : le même rapport en un fichier HTML autonome, à envoyer | [`webapp/export_html.py`](webapp/export_html.py) | `outputs/2_analyse/rapport_interactif.html` |
 | 4. `webapp` : **le rapport en version interactive** (synthèse exécutive, heatmap, Pareto et fiches diagnostic, profils et plans par site, explorateur + vérification) | [`webapp/app.py`](webapp/app.py) | Streamlit, lecture seule des sorties |
 
 Cette branche (`branch-octave-tom-merged`) réunit le workflow de Tom (extraction cause/conséquence,

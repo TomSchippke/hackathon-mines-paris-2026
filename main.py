@@ -5,6 +5,7 @@
                                                                        -> outputs/2_analyse/
   3. verification  contrôles du code + agent vérificateur (avis)      -> outputs/3_verification/
   4. webapp        tableau de bord Streamlit (lecture seule des sorties, à lancer à la demande)
+  5. export        rapport interactif en un fichier HTML autonome, à envoyer -> outputs/2_analyse/rapport_interactif.html
 
 Les étapes 2 et 3 appellent Azure OpenAI (il faut le .env). Chaque étape garde un cache dans
 outputs/cache/ : relancer ne refait que ce qui a changé, et une session d'agent déjà faite est
@@ -15,6 +16,7 @@ Usage :
     python main.py --steps analyse verification
     python main.py --steps verification     # revérifier sans refaire l'analyse
     python main.py --steps webapp           # ouvrir le tableau de bord
+    python main.py --steps export           # fichier HTML à envoyer (s'ouvre sans Python)
 """
 
 from __future__ import annotations
@@ -32,8 +34,8 @@ from pdf_pipeline.pipeline import run as run_pdf
 from review_agent import config as review_config
 from review_agent.pipeline import run as run_review
 
-STEPS = ["pdf", "analyse", "verification", "webapp"]
-DEFAULT_STEPS = ["pdf", "analyse", "verification"]  # la webapp bloque le terminal : seulement sur demande
+STEPS = ["pdf", "analyse", "verification", "export", "webapp"]
+DEFAULT_STEPS = ["pdf", "analyse", "verification", "export"]  # la webapp bloque le terminal : seulement sur demande
 
 
 def main() -> None:
@@ -58,6 +60,9 @@ def main() -> None:
             for old in REVIEW_DIR.glob("*_avant_reecriture*"):  # restes d'anciennes versions de la pipeline
                 old.unlink()
             run_review(args.max_turns_verification)
+        elif step == "export":
+            from webapp.export_html import build
+            print(f"Rapport interactif : {build()}")
         elif step == "webapp":
             subprocess.run([sys.executable, "-m", "streamlit", "run", "webapp/app.py"])
         print(f"-> étape {step} terminée en {time.time() - start:.0f} s")
