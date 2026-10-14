@@ -14,9 +14,10 @@ import pandas as pd
 
 import itertools
 
-from .config import (DBCV_LABELS, DISTINCT_LARGE_GAP, DISTINCT_MIN_GAP, DISTINCT_RATIO, FLEET_PRIORITIES,
-                     NOMINAL_CONSEQUENCES, NOMINAL_SEVERITIES, PRIORITY_THRESHOLDS, PROFILE_CRITERIA,
-                     PROFILE_EXPECTATIONS, STABILITY_LABELS, TOP_PAIRS)
+from .config import (CRITICALITY_TIERS, DBCV_LABELS, DISTINCT_LARGE_GAP, DISTINCT_MIN_GAP, DISTINCT_RATIO,
+                     FLEET_PRIORITIES, MAINTENANCE_INDICATOR, MAINTENANCE_SUSPECT_LEVELS, NOMINAL_CONSEQUENCES,
+                     NOMINAL_SEVERITIES, PRIORITY_THRESHOLDS, PROFILE_CRITERIA, PROFILE_EXPECTATIONS, STABILITY_LABELS,
+                     TOP_PAIRS)
 
 UNKNOWN = "Cause non précisée"      # thème des incidents dont la cause est inconnue (exclus du clustering)
 UNCERTAIN = "Cause incertaine"      # cause inférée avec une confiance faible (exclue, comptée à part)
@@ -29,6 +30,11 @@ def nominal_stops(incidents: pd.DataFrame) -> pd.Series:
     Ce n'est pas une cause à supprimer : exclus des plans et de la priorisation, présentés à part."""
     return (incidents["categorie_consequence"].isin(NOMINAL_CONSEQUENCES)
             & incidents["severity"].isin(NOMINAL_SEVERITIES))
+
+
+def maintenance_suspected(incidents: pd.DataFrame) -> pd.Series:
+    """Incidents où le LLM juge un manque de maintenance probable, d'après la conséquence (hypothèse)."""
+    return incidents["maintenance_suspectee"].isin(MAINTENANCE_SUSPECT_LEVELS)
 
 
 def label(value: float, thresholds: list[tuple[float, str]]) -> str:
@@ -62,6 +68,8 @@ def profile_indicators(incidents: pd.DataFrame) -> dict[str, dict]:
         out[criterion] = 100 * hit.groupby(incidents["site"]).mean()
     out["usure / vieillissement"] = 100 * flag("lie_vieillissement").groupby(incidents["site"]).mean()
     out["lié à la maintenance"] = 100 * flag("lie_maintenance").groupby(incidents["site"]).mean()
+    if "maintenance_suspectee" in incidents:  # indicateur secondaire : absent de PROFILE_EXPECTATIONS
+        out[MAINTENANCE_INDICATOR] = 100 * maintenance_suspected(incidents).groupby(incidents["site"]).mean()
     out["incidents sévères"] = 100 * (incidents["severity"] == "sévère").groupby(incidents["site"]).mean()
     out["coût moyen par incident"] = by_site["estimated_cost_eur"].mean()
     return {c: {"unite": "€" if c.startswith("coût") else "%", "valeurs": {s: round(float(v), 1) for s, v in values.items()}}
@@ -271,3 +279,79 @@ def cause_consequence_pairs(incidents: pd.DataFrame) -> pd.DataFrame:
              .sort_values("incidents", ascending=False).head(TOP_PAIRS).reset_index())
     pairs["part_pct"] = pairs["incidents"].map(lambda n: share(n, len(incidents)))
     return pairs.rename(columns={"theme_cause": "cause", "theme_consequence": "conséquence"})
+
+
+# ------------------------------------------------------------------------------------------------
+# Heatmap causes x conséquences, chaînes prioritaires, criticité Pareto
+# ------------------------------------------------------------------------------------------------
+
+def chain_stats(incidents: pd.DataFrame) -> pd.DataFrame:
+    """Une ligne par case (thème de cause connue, thème de conséquence), arrêts de sécurité nominaux
+    exclus : incidents, coût total et moyen, arrêt total, part du coût du périmètre, maintenance suspectée.
+    `id` = « <id du thème de cause>><id du thème de conséquence> » (identifiant donné à l'agent)."""
+    known = incidents[~incidents["theme_cause"].isin(NOT_A_CAUSE) & ~nominal_stops(incidents)
+                      & (incidents["theme_consequence"] != UNCLASSIFIED)].copy()
+    if known.empty:
+        return pd.DataFrame(columns=["id", "cause", "consequence", "incidents", "cout_total", "cout_moyen",
+                                     "arret_total_h", "part_cout_pct", "maintenance_suspectee_pct"])
+    known["suspect"] = maintenance_suspected(known) if "maintenance_suspectee" in known else False
+    stats = (known.groupby(["theme_cause_id", "theme_consequence_id", "theme_cause", "theme_consequence"])
+             .agg(incidents=("incident_id", "count"), cout_total=("estimated_cost_eur", "sum"),
+                  cout_moyen=("estimated_cost_eur", "mean"), arret_total_h=("downtime_hours", "sum"),
+                  suspect=("suspect", "mean"))
+             .reset_index())
+    stats["id"] = stats["theme_cause_id"] + ">" + stats["theme_consequence_id"]
+    stats["part_cout_pct"] = (100 * stats["cout_total"] / incidents["estimated_cost_eur"].sum()).round(1)
+    stats["maintenance_suspectee_pct"] = (100 * stats.pop("suspect")).round(1)
+    stats = stats.rename(columns={"theme_cause": "cause", "theme_consequence": "consequence"})
+    stats = stats.round({"cout_total": 0, "cout_moyen": 0, "arret_total_h": 1})
+    return stats.sort_values("cout_total", ascending=False).reset_index(drop=True)[
+        ["id", "cause", "consequence", "incidents", "cout_total", "cout_moyen", "arret_total_h", "part_cout_pct",
+         "maintenance_suspectee_pct"]]
+
+
+def heatmap(incidents: pd.DataFrame, value: str = "cout_total") -> pd.DataFrame:
+    """Matrice thème de cause (lignes) x thème de conséquence (colonnes) ; `value` : incidents,
+    cout_total ou arret_total_h. Lignes et colonnes triées par total décroissant."""
+    stats = chain_stats(incidents)
+    if stats.empty:
+        return pd.DataFrame()
+    matrix = stats.pivot_table(index="cause", columns="consequence", values=value, aggfunc="sum", fill_value=0)
+    return matrix.loc[matrix.sum(axis=1).sort_values(ascending=False).index,
+                      matrix.sum(axis=0).sort_values(ascending=False).index]
+
+
+def hotspots(incidents: pd.DataFrame, top_k: int) -> list[dict]:
+    """Les top_k cases les plus coûteuses de la heatmap."""
+    return chain_stats(incidents).head(top_k).to_dict(orient="records")
+
+
+def main_consequence(incidents: pd.DataFrame, cause: str) -> str:
+    """Thème de conséquence le plus coûteux d'une cause (hors arrêts nominaux), sur ce périmètre."""
+    stats = chain_stats(incidents)
+    stats = stats[stats["cause"] == cause]
+    return stats["consequence"].iat[0] if len(stats) else ""
+
+
+def cause_criticality(incidents: pd.DataFrame) -> pd.DataFrame:
+    """Criticité Pareto des thèmes de causes connues d'un type d'installation (arrêts nominaux exclus) :
+    rang par coût total, part cumulée du coût, niveau (config.CRITICALITY_TIERS)."""
+    known = incidents[~incidents["theme_cause"].isin(NOT_A_CAUSE) & ~nominal_stops(incidents)].copy()
+    known["suspect"] = maintenance_suspected(known) if "maintenance_suspectee" in known else False
+    stats = (known.groupby(["theme_cause_id", "theme_cause"])
+             .agg(incidents=("incident_id", "count"), cout_total=("estimated_cost_eur", "sum"),
+                  cout_moyen=("estimated_cost_eur", "mean"), arret_total_h=("downtime_hours", "sum"),
+                  suspect=("suspect", "mean"))
+             .reset_index().rename(columns={"theme_cause_id": "theme_id", "theme_cause": "cause"})
+             .sort_values("cout_total", ascending=False).reset_index(drop=True))
+    total = stats["cout_total"].sum()
+    stats["part_cout_pct"] = (100 * stats["cout_total"] / total).round(1) if total else 0.0
+    stats["cumul_cout_pct"] = (100 * stats["cout_total"].cumsum() / total).round(1) if total else 0.0
+    stats["rang"] = range(1, len(stats) + 1)
+    stats["criticite"] = [CRITICALITY_TIERS[0][1] if rank == 1 else
+                          next(name for limit, name in CRITICALITY_TIERS if cum <= limit + 1e-9)
+                          for rank, cum in zip(stats["rang"], stats["cumul_cout_pct"])]
+    stats["maintenance_suspectee_pct"] = (100 * stats.pop("suspect")).round(1)
+    stats["facteur"] = [dominant_factor(incidents, c) for c in stats["cause"]]
+    stats["consequence_principale"] = [main_consequence(incidents, c) for c in stats["cause"]]
+    return stats.round({"cout_total": 0, "cout_moyen": 0, "arret_total_h": 1})

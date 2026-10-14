@@ -37,14 +37,18 @@ pip install -r requirements.txt
 ```bash
 python main.py                                # toutes les étapes, l'une après l'autre
 python main.py --steps analyse verification   # seulement certaines étapes
+python main.py --steps webapp                 # tableau de bord Streamlit (à la demande)
 ```
 
 ```
  1. pdf            PDF + CSV ──> incidents_full.csv (1800 incidents complets)
                                      │
  2. analyse        AGENT D'ANALYSE (LLM Azure) qui appelle des outils Python bornés :
-                   extraction cause/conséquence ─> clustering + thèmes (×4) ─> profils
+                   extraction cause/conséquence (+ hypothèse « manque de maintenance »)
+                   ─> clustering + nommage/fusion des thèmes (×4 : PV/éolien × causes/conséquences)
+                   ─> heatmap causes × conséquences ─> chaînes prioritaires ─> profils
                    ─> rédaction : faits Python, reformulés par le LLM, vérifiés par un validateur
+                   ─> fiches des causes (criticité Pareto) et plans par site
                    ─> juge : relit chaque texte, corrections acceptées seulement si validées
                                      │  rapport + journal de toutes ses décisions
  3. verification   contrôles automatiques + AGENT VÉRIFICATEUR (avis sur la cohérence) ─> verdict
@@ -55,6 +59,11 @@ python main.py --steps analyse verification   # seulement certaines étapes
 | 1. `pdf` : extraction des PDF (digitaux + scans) | [`pdf_pipeline/`](pdf_pipeline/README.md) | `outputs/1_extraction/incidents_full.csv` |
 | 2. `analyse` : workflow d'analyse (causes, conséquences, thèmes, profils, priorisation, rapport) | [`analysis_agent/`](analysis_agent/README.md) | `outputs/2_analyse/rapport_analyse.md` |
 | 3. `verification` : agent vérificateur | [`review_agent/`](review_agent/README.md) | `outputs/3_verification/verification.md` |
+| 4. `webapp` : rapport actionnable, heatmap, Pareto et fiches, explorateur + vérification | [`webapp/app.py`](webapp/app.py) | Streamlit, lecture seule des sorties |
+
+Cette branche (`branch-octave-tom-merged`) réunit le workflow de Tom (extraction cause/conséquence,
+4 clusterings, agent aux outils bornés, rédaction validée, juge, vérificateur) et les idées de la
+branche d'Octave (fiche diagnostic par cluster, criticité Pareto, webapp Streamlit).
 
 Briques utilisées par l'agent d'analyse, lançables aussi seules pour explorer
 (sorties dans `outputs/exploration/`) : [`topic_modeling/`](topic_modeling/README.md) (BERTopic,

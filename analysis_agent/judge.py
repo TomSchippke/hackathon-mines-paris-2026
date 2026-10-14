@@ -1,6 +1,7 @@
 """Juge : relit chaque texte du rapport avec une grille précise et propose une correction.
 
-Un texte à la fois (justification d'un profil, causes dominantes, chaque mesure du plan, synthèse) :
+Un texte à la fois (justification d'un profil, causes dominantes, chaque mesure du plan, mesure de
+chaque fiche de cause, synthèse) :
   1. le juge (LLM, usage « review ») reçoit le texte, les faits sur lesquels il repose et une grille
      de questions ; il renvoie les problèmes trouvés et un texte corrigé ;
   2. le CODE tranche : la correction n'est acceptée que si elle passe le même validateur que la
@@ -95,6 +96,15 @@ def judge_report(report: dict, journal: list[dict]) -> dict:
             changed = (v["mesure"].strip(), v["mecanisme"].strip()) != (p["action"].strip(), p["mecanisme"].strip())
             if decide(f"{s['site']} / mesure « {p['cause']} »", v, errors, changed, journal, stats):
                 p["action"], p["mecanisme"] = v["mesure"], v["mecanisme"]
+    for f in report.get("fiches", []):
+        hint = PREVENTIVE_CATALOGUE.get(f["facteur"])
+        sheet_facts = f["faits"] + (f"\nExemple de mesure préventive pour ce facteur : {hint[1]} ({hint[2]})." if hint else "")
+        v = ask_judge("mesure d'une fiche de cause", f"Mesure : {f['mesure']}\nMécanisme : {f['mecanisme']}", sheet_facts,
+                      GRID_MEASURE, {"mesure": "la mesure corrigée", "mecanisme": "le mécanisme corrigé"})
+        errors = measure_errors(v, f["cause"], f["facteur"])
+        changed = (v["mesure"].strip(), v["mecanisme"].strip()) != (f["mesure"].strip(), f["mecanisme"].strip())
+        if decide(f"fiche {f['asset_type']} / mesure « {f['cause']} »", v, errors, changed, journal, stats):
+            f["mesure"], f["mecanisme"] = v["mesure"], v["mecanisme"]
     v = ask_judge("synthèse", report["synthese"], report["faits_synthese"], GRID_SYNTHESIS, text_field)
     errors = text_errors(v["correction"], report["faits_synthese"])
     if len([x for x in numbers(v["correction"]) if x > 10]) < 3:

@@ -7,14 +7,17 @@ prend les décisions avec 2 ou 3 outils bornés (voir tools.py) :
     1. agent    pour chaque type (solar, wind) et chaque dimension (cause, consequence) :
                   a. clustering : essaie des réglages (run_clustering), en choisit un (select_clustering)
                   b. thèmes     : lit les clusters (topic_details), les nomme / regroupe (define_themes)
-    2. agent    profils : lit les points distinctifs de chaque site (site_evidence) et associe chaque
+    2. agent    priorités : lit la heatmap thèmes de causes x thèmes de conséquences (heatmap_hotspots)
+                et choisit les chaînes cause -> conséquence prioritaires (select_priority_chains)
+    3. agent    profils : lit les points distinctifs de chaque site (site_evidence) et associe chaque
                 site à un profil A, B, C (assign_profiles)
-    3. code+LLM rédaction : les faits sont calculés en Python (facts.py) ; le LLM ne fait que les
-                reformuler et un validateur vérifie chaque chiffre et chaque phénomène cité (writing.py)
+    4. code+LLM rédaction : les faits sont calculés en Python (facts.py) ; le LLM ne fait que les
+                reformuler et un validateur vérifie chaque chiffre et chaque phénomène cité (writing.py) ;
+                plans par site, fiche de chaque cause (criticité Pareto), synthèse ; puis relecture par le juge
 
 Si l'agent n'atteint pas l'objectif d'une phase, le code la termine de façon simple (meilleur
-clustering conforme selon les scores ; thème nommé par sa catégorie ou son facteur dominant ; profils
-selon les règles d'attentes) et le signale dans le journal et dans le rapport.
+clustering conforme selon les scores ; thème nommé par sa catégorie ou son facteur dominant ; chaînes
+les plus coûteuses ; profils selon les règles d'attentes) et le signale dans le journal et dans le rapport.
 
 Sorties dans outputs/2_analyse/ :
     rapport_analyse.md       le rapport final (texte de l'agent + tableaux calculés)
@@ -22,6 +25,8 @@ Sorties dans outputs/2_analyse/ :
     decisions.json           clusterings choisis, contenu du rapport, scores des essais
     clustering_essais.csv    scores de chaque essai de clustering
     themes.csv               thèmes de causes et de conséquences : nom, clusters, taille, justification
+    heatmap_<type>.csv/.png  heatmap thèmes de causes x thèmes de conséquences (coût, incidents, arrêt)
+    fiches_causes.csv        fiche et criticité Pareto de chaque thème de cause
     incidents_analyse.csv    chaque incident : cause, conséquence, leurs clusters et thèmes, action
 
 Usage :
@@ -40,13 +45,13 @@ from llm.agent import dispatch, journal_markdown, run_agent
 from paths import ANALYSIS_DIR, ANALYSIS_JOURNAL, ANALYSIS_REPORT, INCIDENTS_FULL
 
 from . import facts as F
-from .config import (MIN_CHOSEN_DBCV, ASSET_LABELS, ASSET_TYPES, DIMENSION_LABELS, DIMENSIONS, PHASE_CLUSTERING, PHASE_PROFILES,
-                     PHASE_THEMES, ROLE, SITE_PROFILES, TURNS)
+from .config import (MIN_CHOSEN_DBCV, ASSET_LABELS, ASSET_TYPES, DIMENSION_LABELS, DIMENSIONS, PHASE_CLUSTERING,
+                     PHASE_PRIORITIES, PHASE_PROFILES, PHASE_THEMES, PRIORITY_CHAINS_RANGE, ROLE, SITE_PROFILES, TURNS)
 from .report import export, render
 from .tools import TOOLS, AnalysisWorkspace
 from .validation_inferences import inference_sample
 from .judge import judge_report
-from .writing import site_texts, synthesis
+from .writing import cause_sheets, site_texts, synthesis
 
 SINGULAR = {"cause": "cause", "consequence": "conséquence"}
 
@@ -126,6 +131,13 @@ def fallback_merge(ws: AnalysisWorkspace, asset_type: str, dimension: str) -> li
             break
         merged.append((a, b))
     return merged
+
+
+def fallback_priorities(ws: AnalysisWorkspace, asset_type: str) -> None:
+    """L'agent n'a pas choisi : les chaînes les plus coûteuses de la heatmap."""
+    top = ws.heatmap_hotspots(asset_type)["cases"][:PRIORITY_CHAINS_RANGE[0]]
+    dispatch(ws.tools, "select_priority_chains", {"asset_type": asset_type, "chains": [c["id"] for c in top],
+             "justification": "CHOIX AUTOMATIQUE par le code : les chaînes au plus fort coût total."})
 
 
 def fallback_profiles(ws: AnalysisWorkspace) -> None:
@@ -208,7 +220,16 @@ def run(max_turns: int | None = None) -> bool:
                                 "texte": f"{k} : {len(missing)} clusters rangés automatiquement {missing} ; "
                                          f"{len(merged)} doublons fusionnés automatiquement {merged}"})
 
-    # 2. Profils (agent).
+    # 2. Chaînes cause -> conséquence prioritaires, lues sur la heatmap (agent).
+    for asset_type in ASSET_TYPES:
+        if not run_phase(ws, journal, f"Priorités {asset_type}",
+                         PHASE_PRIORITIES.format(asset=ASSET_LABELS[asset_type] + "s", sites=", ".join(ws.sites[asset_type])),
+                         ["heatmap_hotspots", "select_priority_chains"], {"asset_type": asset_type},
+                         lambda a=asset_type: a in ws.priority_chains, turns["priorities"]):
+            fallback_priorities(ws, asset_type)
+            journal.append({"tour": 0, "type": "automatique", "texte": f"{asset_type} : chaînes prioritaires choisies par le code"})
+
+    # 3. Profils (agent).
     profiles = json.dumps(SITE_PROFILES, ensure_ascii=False, indent=1)
     sites = {a: ws.sites[a] for a in ASSET_TYPES}
     if not run_phase(ws, journal, "Profils",
@@ -217,7 +238,7 @@ def run(max_turns: int | None = None) -> bool:
         fallback_profiles(ws)
         journal.append({"tour": 0, "type": "automatique", "texte": "profils attribués par le code (règles d'attentes)"})
 
-    # 3. Rédaction contrôlée (faits Python, reformulation LLM, validateur), puis relecture par le juge.
+    # 4. Rédaction contrôlée (faits Python, reformulation LLM, validateur), puis relecture par le juge.
     journal.append({"tour": 0, "type": "phase", "texte": "Rédaction (faits calculés, reformulés et validés)"})
     table = ws.incidents_table()
     site_reports = []
@@ -227,8 +248,9 @@ def run(max_turns: int | None = None) -> bool:
         for site in ws.sites[asset_type]:
             site_reports.append(site_texts(site, asset_type, ws.profiles[site]["profil"], sub, indicators, journal))
     fleet = F.fleet_priorities(table)
-    synthese, synthese_facts = synthesis(table, site_reports, fleet, journal)
-    ws.report = {"sites": site_reports, "synthese": synthese, "faits_synthese": synthese_facts}
+    sheets = cause_sheets(table, journal)
+    synthese, synthese_facts = synthesis(table, site_reports, fleet, journal, ws.priority_chains)
+    ws.report = {"sites": site_reports, "fiches": sheets, "synthese": synthese, "faits_synthese": synthese_facts}
     journal.append({"tour": 0, "type": "phase", "texte": "Relecture par le juge (grille, correction validée par le code)"})
     judge_report(ws.report, journal)
     finished = True

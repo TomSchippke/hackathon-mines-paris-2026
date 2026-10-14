@@ -54,6 +54,11 @@ CAUSE_TYPES = ["explicite", "inférée", "inconnue"]
 
 CONFIANCE = ["faible", "moyenne", "haute"]
 
+# Hypothèse « manque de maintenance », déduite de la CONSÉQUENCE (encrassement accumulé, corrosion
+# avancée, usure non détectée...). Champ SÉPARÉ : il ne modifie jamais cause_racine ni cause_type, qui
+# restent stricts (indice vérifié). Sert d'indicateur secondaire, jamais de critère de profil.
+MAINTENANCE_SUSPECTEE = ["non", "plausible", "probable"]
+
 # Valeur unique pour une cause inconnue. Toutes les variantes (« non précisée », « non déterminée »...)
 # y sont ramenées, et ces incidents sont comptés à part (exclus du clustering des causes).
 CAUSE_INCONNUE = "cause non précisée dans le rapport"
@@ -95,6 +100,15 @@ pas la cause ici, et n'indique ni durée ni montant.
 - lie_vieillissement : true si l'usure ou l'âge de l'installation a joué un rôle.
 - lie_maintenance : true seulement si le rapport indique un défaut, un retard ou une absence de \
 maintenance (une simple intervention de réparation ne suffit pas).
+- maintenance_suspectee : même si le rapport ne le dit pas, un défaut de maintenance (inspection, \
+nettoyage, graissage, remplacement préventif manquant ou en retard) a-t-il pu laisser l'incident se \
+produire ou s'aggraver ? Raisonne à partir de la CONSÉQUENCE et de l'état constaté : dégradation \
+progressive qu'une inspection aurait repérée (encrassement accumulé, corrosion avancée, usure poussée, \
+nid ou rongement installé, desserrage, fuite ancienne) -> « plausible » ou « probable » ; événement \
+soudain et externe (foudre, grêle, tempête sur un équipement sain), défaut de fabrication ou erreur de \
+travaux -> « non ». « probable » seulement si l'état décrit montre une dégradation installée depuis \
+longtemps. Ce champ est une hypothèse : il ne change PAS cause_racine ni cause_type.
+- justification_maintenance : une phrase qui justifie maintenance_suspectee (vide si « non »).
 - action_corrective : l'action concrète qui éviterait que l'incident se reproduise, en une phrase.
 - confiance : ta confiance dans la cause identifiée (« faible » si l'indice est ténu).
 
@@ -114,7 +128,7 @@ RESPONSE_FORMAT = {
             "additionalProperties": False,
             "required": ["composant", "cause_racine", "cause_type", "indice", "consequence", "categorie_consequence",
                          "facteur_principal", "facteurs_secondaires", "lie_vieillissement", "lie_maintenance",
-                         "action_corrective", "confiance"],
+                         "maintenance_suspectee", "justification_maintenance", "action_corrective", "confiance"],
             "properties": {
                 "composant": {"type": "string", "enum": COMPOSANTS},
                 "cause_racine": {"type": "string"},
@@ -126,6 +140,8 @@ RESPONSE_FORMAT = {
                 "facteurs_secondaires": {"type": "array", "items": {"type": "string", "enum": FACTEURS}},
                 "lie_vieillissement": {"type": "boolean"},
                 "lie_maintenance": {"type": "boolean"},
+                "maintenance_suspectee": {"type": "string", "enum": MAINTENANCE_SUSPECTEE},
+                "justification_maintenance": {"type": "string"},
                 "action_corrective": {"type": "string"},
                 "confiance": {"type": "string", "enum": CONFIANCE},
             },

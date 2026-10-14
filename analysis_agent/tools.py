@@ -17,6 +17,8 @@ Outils, dans l'ordre d'utilisation :
     topic_details            exemples et statistiques de clusters
     define_themes            range des clusters dans des thèmes nommés
     remove_theme             défait un thème
+    heatmap_hotspots         cases les plus coûteuses de la heatmap causes x conséquences
+    select_priority_chains   chaînes cause -> conséquence prioritaires (outil final de la phase priorités)
     site_evidence            points distinctifs et statistiques de chaque site
     assign_profiles          associe chaque site à un profil A, B, C (outil final de la phase profils)
 """
@@ -33,7 +35,7 @@ from paths import CACHE_DIR
 from topic_modeling.config import FRENCH_STOPWORDS, NGRAM_RANGE, UMAP_PARAMS
 
 from . import facts as F
-from .config import (CONSEQUENCE_WORDS, MERGE_SIMILARITY, MIN_CHOSEN_DBCV, ASSET_TYPES, DIMENSIONS, EXAMPLE_MAX_CHARS, EXTRA_STOPWORDS, MAX_CLUSTERING_RUNS,
+from .config import (CONSEQUENCE_WORDS, HOTSPOTS_MAX, MERGE_SIMILARITY, PRIORITY_CHAINS_RANGE, MIN_CHOSEN_DBCV, ASSET_TYPES, DIMENSIONS, EXAMPLE_MAX_CHARS, EXTRA_STOPWORDS, MAX_CLUSTERING_RUNS,
                      MAX_THEME_NAME_CHARS, MAX_THEMES_PER_CALL, MAX_TOPICS_PER_CALL, MAX_UNCLASSIFIED_PCT,
                      MERGE_MIN_COHESION_RATIO, MIN_CLUSTER_SIZE_RANGE, MIN_STABILITY, N_DESCRIPTIONS,
                      N_EXAMPLES, N_TOPICS_RANGE, NEUTRAL_FACTORS, SITE_PROFILES, STABILITY_SEEDS)
@@ -135,6 +137,7 @@ class AnalysisWorkspace:
         self.selected: dict[str, dict] = {}     # "type/dim" -> {"run_id", "justification"}
         self.themes: dict[str, dict] = {}       # theme_id -> thème
         self.profiles: dict[str, dict] | None = None  # site -> {"profil", "raisonnement"} (assign_profiles)
+        self.priority_chains: dict[str, dict] = {}  # type -> {"chaines", "justification"} (select_priority_chains)
         self.report: dict | None = None         # contenu du rapport (rédigé ensuite par writing.py)
         self._theme_count = 0
 
@@ -145,7 +148,8 @@ class AnalysisWorkspace:
                 "topic_details": self.topic_details, "define_themes": self.define_themes,
                 "define_theme": self.define_theme, "compare_clusters": self.compare_clusters,
                 "merge_themes": self.merge_themes,
-                "remove_theme": self.remove_theme, "site_evidence": self.site_evidence,
+                "remove_theme": self.remove_theme, "heatmap_hotspots": self.heatmap_hotspots,
+                "select_priority_chains": self.select_priority_chains, "site_evidence": self.site_evidence,
                 "assign_profiles": self.assign_profiles}
 
     # ---- état et vérifications -----------------------------------------------------------------
@@ -521,6 +525,46 @@ class AnalysisWorkspace:
         return {"clusters_liberes": theme["topics"],
                 "restants_sans_theme": self.unthemed(theme["asset_type"], theme["dimension"])}
 
+    def heatmap_hotspots(self, asset_type: str, site: str | None = None, top_k: int = HOTSPOTS_MAX) -> dict:
+        """Cases les plus coûteuses de la heatmap causes x conséquences (calculées en Python, facts.py)."""
+        self.check_args(asset_type)
+        if site is not None:
+            check_choice(site, self.sites[asset_type], "site")
+        top_k = check_int(top_k, 1, HOTSPOTS_MAX, "top_k")
+        self.require_themes(asset_type)
+        table = self.incidents_table()
+        table = table[table["asset_type"] == asset_type]
+        if site is not None:
+            table = table[table["site"] == site]
+        return {"asset_type": asset_type, "site": site or "tous", "incidents": len(table),
+                "cout_total_perimetre": round(float(table["estimated_cost_eur"].sum())),
+                "cases": F.hotspots(table, top_k),
+                "lecture": "part_cout_pct = part du coût total du périmètre ; arrêts de sécurité nominaux exclus"}
+
+    def select_priority_chains(self, asset_type: str, chains: list[str], justification: str) -> dict:
+        """Outil final de la phase priorités : les chaînes doivent être parmi les HOTSPOTS_MAX cases les
+        plus coûteuses du type, et la justification ne citer que des chiffres de ces cases."""
+        from .writing import text_errors
+
+        self.check_args(asset_type)
+        self.require_themes(asset_type)
+        justification = check_text(justification, "justification", 1500)
+        low, high = PRIORITY_CHAINS_RANGE
+        table = self.incidents_table()
+        top = F.hotspots(table[table["asset_type"] == asset_type], HOTSPOTS_MAX)
+        allowed = {c["id"]: c for c in top}
+        chains = list(dict.fromkeys(check_list(chains, high, "chains")))
+        if len(chains) < min(low, len(allowed)):
+            raise ToolError(f"choisis au moins {min(low, len(allowed))} chaînes (reçu : {len(chains)})")
+        for c in chains:
+            check_choice(c, list(allowed), "chaîne")
+        facts = "\n".join(str(c) for c in top) + f"\n{len(table[table['asset_type'] == asset_type])} incidents"
+        errors = text_errors(justification, facts)
+        if errors:
+            raise ToolError("justification refusée : " + " ; ".join(errors))
+        self.priority_chains[asset_type] = {"chaines": [allowed[c] for c in chains], "justification": justification}
+        return {"message": "chaînes prioritaires enregistrées", "chaines": chains}
+
     def site_evidence(self, asset_type: str) -> dict:
         """Ce qui distingue chaque site des autres sites du même type (calculé en Python, facts.py)."""
         self.check_args(asset_type)
@@ -620,6 +664,15 @@ TOOLS = [
          {"asset_type": ASSET, "dimension": DIMENSION, "theme_ids": {"type": "array", "items": {"type": "string"}},
           "name": {"type": "string"}}),
     tool("remove_theme", "Supprime un thème pour libérer ses clusters.", {"theme_id": {"type": "string"}}),
+    tool("heatmap_hotspots", f"Cases les plus coûteuses de la heatmap thèmes de causes connues x thèmes de conséquences "
+                             f"(1 à {HOTSPOTS_MAX}) : id, cause, conséquence, incidents, coût total et moyen, arrêt, part "
+                             "du coût, part de maintenance suspectée. Sur tout le type, ou sur un site.",
+         {"asset_type": ASSET, "site": {"type": ["string", "null"], "description": "un site du type, ou null pour tous"},
+          "top_k": {"type": "integer", "minimum": 1, "maximum": HOTSPOTS_MAX}}, required=["asset_type"]),
+    tool("select_priority_chains", f"Outil final : choisit {PRIORITY_CHAINS_RANGE[0]} à {PRIORITY_CHAINS_RANGE[1]} chaînes "
+                                   "cause -> conséquence prioritaires (id de heatmap_hotspots sans site).",
+         {"asset_type": ASSET, "chains": {"type": "array", "items": {"type": "string"}, "maxItems": PRIORITY_CHAINS_RANGE[1]},
+          "justification": {"type": "string", "description": "pourquoi ces chaînes, avec les chiffres de l'outil"}}),
     tool("site_evidence", "Pour chaque site : points distinctifs (critères où il se distingue nettement des autres "
                           "sites), causes connues les plus fréquentes, part de causes non précisées ; et les critères "
                           "des profils mesurés sur chaque site.", {"asset_type": ASSET}),

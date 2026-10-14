@@ -22,6 +22,7 @@ python -m cause_extraction          # lancement seul, pour explorer
 | `facteur_principal` | parmi une liste fermée : corrosion saline, foudre, vent, grêle, chaleur, poussière, nuisibles, sol, usure, défaut de fabrication, maintenance, travaux, défaut électrique, indéterminé |
 | `facteurs_secondaires` | autres facteurs ayant contribué |
 | `lie_vieillissement`, `lie_maintenance` | l'âge ou la maintenance ont-ils joué un rôle ? |
+| `maintenance_suspectee`, `justification_maintenance` | hypothèse : un défaut de maintenance a-t-il pu laisser l'incident se produire, **d'après la conséquence** et l'état constaté (non / plausible / probable) ? Champ séparé : ne modifie jamais `cause_racine` ni `cause_type` ; indicateur secondaire, hors attribution des profils |
 | `action_corrective` | ce qui éviterait que ça se reproduise (base du plan de remédiation) |
 | `confiance` | faible / moyenne / haute |
 

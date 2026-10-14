@@ -123,6 +123,19 @@ class ReviewWorkspace:
                                           "avec son mécanisme : " + "; ".join(errors))
             check("plans : mesures préventives avec mécanisme", not bad_plans,
                   f"mesures à revoir : {bad_plans}" if bad_plans else "toutes les mesures sont préventives et justifiées")
+            chains = self.decisions.get("chaines_prioritaires", {})
+            for asset_type in ASSET_TYPES:
+                choice = chains.get(asset_type)
+                check(f"{asset_type} : chaînes cause -> conséquence prioritaires (heatmap)", bool(choice and choice["chaines"]),
+                      ("choix automatique par le code" if choice["justification"].startswith("CHOIX AUTOMATIQUE")
+                       else "choisies par l'agent") + " : " + ", ".join(f"{c['cause']} -> {c['consequence']}"
+                                                                       for c in choice["chaines"])
+                      if choice else "aucune chaîne choisie")
+            bad_sheets = [f"{f['asset_type']} / {f['cause']}" for f in self.report.get("fiches", [])
+                          if measure_errors(f, f["cause"], f.get("facteur", ""))]
+            check("fiches de causes : mesures préventives avec mécanisme", not bad_sheets,
+                  f"mesures à revoir : {bad_sheets}" if bad_sheets else
+                  f"{len(self.report.get('fiches', []))} fiches, toutes préventives et justifiées")
             for s in self.report["sites"]:
                 origin = s.get("origine_causes_dominantes", {})
                 if origin.get("inférée", 0) > 50:

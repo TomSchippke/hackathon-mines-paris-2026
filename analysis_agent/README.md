@@ -21,8 +21,10 @@ python main.py --steps analyse       # ou : python -m analysis_agent
 ```
 0. code       extraction : cause, type de cause, conséquence, catégorie de conséquence (LLM, en cache)
 1. agent      ×4 (solar/wind × causes/conséquences) : clustering, puis nommage des thèmes
-2. agent      profils : points distinctifs de chaque site -> profil A, B, C
-3. code + LLM rédaction : faits Python -> reformulation LLM -> validateur -> texte Python si échec
+2. agent      priorités : heatmap thèmes de causes × thèmes de conséquences -> chaînes prioritaires
+3. agent      profils : points distinctifs de chaque site -> profil A, B, C
+4. code + LLM rédaction : faits Python -> reformulation LLM -> validateur -> texte Python si échec
+              (plans par site, fiche + criticité Pareto de chaque cause, synthèse) ; puis juge
 ```
 
 Si l'agent n'atteint pas l'objectif d'une phase, le code la termine (meilleur clustering conforme ;
@@ -63,14 +65,48 @@ et « usure » sont à 0.85 sans être la même cause, alors que les vrais doubl
 avec le même facteur. La phase ne se termine que lorsqu'il ne reste **ni cluster sans thème, ni
 doublon** ; sinon le code complète et fusionne lui-même (signalé).
 
-## Phase 2 : profils (agent)
+## Phase 2 : chaînes prioritaires sur la heatmap (agent)
+
+La heatmap croise, pour chaque type, les thèmes de causes **connues** (lignes) et les thèmes de
+conséquences (colonnes) ; une case = nombre d'incidents et coût total (arrêts de sécurité nominaux
+exclus). Elle est calculée en Python (`facts.chain_stats`, `facts.heatmap`), exportée en PNG et CSV
+et affichée dans la webapp.
+
+| Outil | Ce qu'il fait | Bornes et contrôles |
+|---|---|---|
+| `heatmap_hotspots(site=None, top_k)` | cases les plus coûteuses (id, cause, conséquence, incidents, coûts, arrêt, part du coût, part de maintenance suspectée), sur le type ou sur un site | `top_k` entre 1 et **10** ; site du type seulement ; thèmes faits |
+| `select_priority_chains(chains, justification)` | **outil final** : chaînes cause → conséquence prioritaires | **3 à 5** chaînes, toutes parmi les 10 cases les plus coûteuses du type ; justification refusée si elle cite un chiffre absent des cases (validateur de la rédaction) |
+
+L'agent peut faire passer une conséquence grave (incendie, destruction) avant une conséquence
+fréquente et bénigne. S'il ne choisit pas, le code prend les 3 cases les plus coûteuses (signalé).
+Les chaînes alimentent la synthèse et la section 5 du rapport.
+
+## Hypothèse « manque de maintenance »
+
+L'extraction renvoie aussi `maintenance_suspectee` (non / plausible / probable) et
+`justification_maintenance` : le LLM juge, **d'après la conséquence et l'état constaté**
+(encrassement accumulé, corrosion avancée, usure poussée...), si un défaut de maintenance a pu laisser
+l'incident se produire. C'est un champ **séparé** : `cause_racine` et `cause_type` restent stricts
+(indice vérifié). La part « probable » est un **indicateur secondaire** (`config.MAINTENANCE_INDICATOR`) :
+montrée dans `site_evidence`, la heatmap, les fiches et le rapport, mais absente de
+`PROFILE_EXPECTATIONS`, donc sans effet sur l'attribution des profils.
+
+## Fiches des causes et criticité Pareto (repris de la branche octave)
+
+Chaque thème de cause connue reçoit une **criticité Pareto** (`facts.cause_criticality`) : thèmes
+triés par coût total, part cumulée ≤ 70 % critique, ≤ 90 % élevée, ≤ 98 % moyenne, sinon faible
+(le premier est toujours critique). Le LLM rédige sa **fiche** (`writing.cause_sheets`) : description,
+conséquences les plus coûteuses (lues dans la heatmap), mesure préventive et mécanisme. Mêmes règles
+que les plans : faits calculés, validateur, catalogue de secours, puis relecture de la mesure par le juge.
+
+## Phase 3 : profils (agent)
 
 | Outil | Ce qu'il fait | Bornes et contrôles |
 |---|---|---|
 | `site_evidence(asset_type)` | pour chaque site : **points distinctifs** (critères où il est seul en tête ou en queue avec un écart net), causes connues les plus fréquentes, part de causes non précisées ; critères des profils mesurés sur chaque site | — |
 | `assign_profiles(assignments)` | associe chaque site à un profil | les 6 sites ; **A, B, C une fois chacun** par type |
 
-## Phase 3 : rédaction contrôlée (`facts.py`, `writing.py`)
+## Phase 4 : rédaction contrôlée (`facts.py`, `writing.py`)
 
 Tout ce que le rapport affirme est calculé en Python :
 
@@ -102,7 +138,7 @@ Si le LLM échoue, la mesure vient d'un **catalogue de mesures préventives par 
 Si le site ne vérifie nettement aucune attente de son profil, la justification doit dire qu'il est
 **attribué par élimination**.
 
-## Phase 4 : relecture par le juge (`judge.py`)
+## Relecture par le juge (`judge.py`)
 
 Chaque texte (justification, causes dominantes, chaque mesure, synthèse) est relu séparément par un
 juge LLM avec une **grille** : affirmation absente des faits, extrapolation (« coût faible donc bonne
@@ -125,7 +161,9 @@ générée en Python ; c'est consigné dans `journal.md`.
 
 | Fichier | Contenu |
 |---|---|
-| `rapport_analyse.md` | le livrable (8 sections) |
+| `rapport_analyse.md` | le livrable (10 sections) |
+| `heatmap_<type>.png` / `.csv` | heatmap thèmes de causes × thèmes de conséquences |
+| `fiches_causes.csv` | fiche et criticité Pareto de chaque thème de cause |
 | `journal.md` / `journal.json` | chaque phase : raisonnement, outils, refus, rédaction (essais, erreurs du validateur), reprises par le code |
 | `incidents_analyse.csv` | chaque incident : cause, type de cause, conséquence, catégorie, clusters, thèmes, action |
 | `themes.csv` | thèmes de causes et de conséquences, avec qui les a nommés |

@@ -79,7 +79,7 @@ SITE_PROFILES = {
 # --- Phases du workflow : le code fixe l'ordre, le LLM décide dans chaque phase ---------------
 # Une phase = une petite session d'agent, avec 2 ou 3 outils et un seul objectif. Un petit modèle
 # suit bien une consigne courte ; il se perd dans un plan de 40 étapes.
-TURNS = {"clustering": 12, "themes": 50, "profiles": 12}  # tours maximum par phase
+TURNS = {"clustering": 12, "themes": 50, "priorities": 10, "profiles": 12}  # tours maximum par phase
 
 ROLE = """Tu es analyste fiabilité pour un exploitant de centrales photovoltaïques et de parcs \
 éoliens. Tu travailles avec des outils : ils font les calculs, toi tu prends les décisions et tu \
@@ -131,6 +131,30 @@ les descriptions des profils). Une attribution qui respecte moins d'attentes ser
 3. assign_profiles avec les 6 sites, en expliquant ton raisonnement.
 Profils :
 {profiles}"""
+
+# --- Heatmap causes x conséquences et chaînes prioritaires (phase priorités) --------------------
+HOTSPOTS_MAX = 10                    # cases renvoyées au plus par heatmap_hotspots (top_k)
+PRIORITY_CHAINS_RANGE = (3, 5)       # chaînes prioritaires choisies par type d'installation
+
+# --- Criticité Pareto des thèmes de causes (repris de la branche octave) ---------------------------
+# Part cumulée du coût (thèmes triés par coût décroissant) -> niveau. Le premier thème est toujours critique.
+CRITICALITY_TIERS = [(70.0, "Critique"), (90.0, "Élevée"), (98.0, "Moyenne"), (100.0, "Faible")]
+
+# Hypothèse « manque de maintenance » (extraction, champ maintenance_suspectee) : niveaux comptés comme
+# maintenance suspectée. Indicateur SECONDAIRE : montré dans le rapport, absent de PROFILE_EXPECTATIONS.
+MAINTENANCE_SUSPECT_LEVELS = ["probable"]
+MAINTENANCE_INDICATOR = "maintenance suspectée (hypothèse)"
+
+PHASE_PRIORITIES = f"""PHASE : choisir les chaînes cause -> conséquence prioritaires des incidents {{asset}}.
+Objectif : des chaînes choisies avec select_priority_chains.
+La heatmap croise les thèmes de causes connues (lignes) et les thèmes de conséquences (colonnes) ; \
+chaque case compte les incidents et leur coût total (arrêts de sécurité nominaux exclus).
+1. heatmap_hotspots sans site : les cases les plus coûteuses du parc {{asset}}. Tu peux aussi regarder un \
+site précis (site = l'un de {{sites}}) pour repérer une chaîne propre à un site.
+2. select_priority_chains avec {PRIORITY_CHAINS_RANGE[0]} à {PRIORITY_CHAINS_RANGE[1]} identifiants de chaînes \
+(« id » renvoyé par heatmap_hotspots sans site, parmi les {HOTSPOTS_MAX} premières), et une justification \
+courte : le coût compte, mais une conséquence grave (incendie, destruction) peut passer devant une \
+conséquence fréquente et bénigne. Ne cite que des chiffres renvoyés par l'outil."""
 
 # --- Juge (judge.py) : relit chaque texte avec une grille et propose une correction ---------------
 JUDGE_ROLE = """Tu es un relecteur exigeant d'un rapport de maintenance. On te donne UN texte du rapport, les \

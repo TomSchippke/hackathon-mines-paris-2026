@@ -132,6 +132,7 @@ def run(input_csv: Path, workers: int) -> Path:
         incidents=("incident_id", "count"),
         pct_lie_vieillissement=("lie_vieillissement", lambda s: round(100 * s.astype(bool).mean(), 1)),
         pct_lie_maintenance=("lie_maintenance", lambda s: round(100 * s.astype(bool).mean(), 1)),
+        pct_maintenance_suspectee=("maintenance_suspectee", lambda s: round(100 * (s == "probable").mean(), 1)),
         cout_moyen_eur=("estimated_cost_eur", lambda s: round(s.mean())),
         arret_moyen_h=("downtime_hours", lambda s: round(s.mean(), 1)),
         pct_confiance_faible=("confiance", lambda s: round(100 * (s == "faible").mean(), 1)),

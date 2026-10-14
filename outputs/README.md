@@ -12,8 +12,10 @@ outputs/
 │   ├── journal.md               toutes les décisions de l'agent (journal.json : version machine)
 │   ├── incidents_analyse.csv    chaque incident : cause, conséquence, leurs thèmes, action corrective
 │   ├── themes.csv               thèmes de causes et de conséquences nommés par l'agent
+│   ├── heatmap_<type>.png/.csv  heatmap thèmes de causes × thèmes de conséquences (coût, incidents)
+│   ├── fiches_causes.csv        fiche et criticité Pareto de chaque thème de cause
 │   ├── clustering_essais.csv    scores de chaque essai de clustering
-│   └── decisions.json           clusterings choisis et contenu du rapport
+│   └── decisions.json           clusterings choisis, chaînes prioritaires et contenu du rapport
 ├── 3_verification/          ← À UTILISER
 │   ├── verification.md          verdict, contrôles automatiques, constats du vérificateur
 │   └── journal.md               déroulé de la vérification

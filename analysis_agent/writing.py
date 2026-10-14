@@ -21,8 +21,8 @@ from typing import Callable
 from llm.client import chat
 
 from . import facts as F
-from .config import (ACTION_TYPES, CURATIVE_PATTERN, GENERIC_ACTIONS, PREVENTIVE_CATALOGUE, SITE_PROFILES,
-                     WRITE_RETRIES, WRITER_ROLE)
+from .config import (ACTION_TYPES, ASSET_LABELS, CURATIVE_PATTERN, GENERIC_ACTIONS, PREVENTIVE_CATALOGUE,
+                     SITE_PROFILES, WRITE_RETRIES, WRITER_ROLE)
 
 # Phénomènes surveillés par le validateur : un texte ne peut en citer un que s'il figure dans les faits.
 CONCEPTS = {
@@ -224,7 +224,8 @@ def site_texts(site: str, asset_type: str, profile: str, incidents, indicators: 
 
     out = write(f"Rédaction {site}", task, facts_text, schema, check, fallback, journal)
     actions = {a["cause"]: a for a in out["actions"]}
-    plan = [{"cause": p["cause"], "facteur": factors[p["cause"]], "type": actions.get(p["cause"], {}).get("type", ""),
+    plan = [{"cause": p["cause"], "facteur": factors[p["cause"]],
+             "consequence_principale": F.main_consequence(g, p["cause"]), "type": actions.get(p["cause"], {}).get("type", ""),
              "action": actions.get(p["cause"], {}).get("mesure", ""), "mecanisme": actions.get(p["cause"], {}).get("mecanisme", ""),
              "priorite": p["priorite"], "incidents": p["incidents"], "cout_total": p["cout_total"],
              "part_cout_pct": p["part_cout_pct"]} for p in priority]
@@ -235,8 +236,10 @@ def site_texts(site: str, asset_type: str, profile: str, incidents, indicators: 
             "faits": {"justification_profil": profile_facts, "causes_dominantes": dominant_facts, "plan": priority_facts}}
 
 
-def synthesis(incidents, site_reports: list[dict], fleet, journal: list[dict]) -> tuple[str, str]:
-    """Synthèse pour un responsable : chiffres clés et actions prioritaires du parc."""
+def synthesis(incidents, site_reports: list[dict], fleet, journal: list[dict],
+              chains: dict[str, dict] | None = None) -> tuple[str, str]:
+    """Synthèse pour un responsable : chiffres clés, chaînes cause -> conséquence prioritaires (heatmap)
+    et actions prioritaires du parc."""
     by_site = incidents.groupby("site")["estimated_cost_eur"].sum().sort_values(ascending=False)
     actions = {(r["site"], p["cause"]): p["action"] for r in site_reports for p in r["plan"]}
     structural = F.structural_losses(incidents)
@@ -250,10 +253,12 @@ def synthesis(incidents, site_reports: list[dict], fleet, journal: list[dict]) -
         f"{int(structural['arrets'].sum())} incidents, {F.euros(structural['cout_par_an'].sum())} par an de perte structurelle.",
         *(f"- Priorité {i} du parc : {r.cause} sur {r.site} ({r.incidents} incidents, {F.euros(r.cout_par_an)} par an) ; "
           f"mesure : {actions.get((r.site, r.cause), 'à définir')}" for i, r in enumerate(top.itertuples(), 1)),
+        *(f"- Chaîne prioritaire ({ASSET_LABELS[a]}) : {c['cause']} -> {c['consequence']} ({c['incidents']} incidents, "
+          f"{F.euros(c['cout_total'])})" for a, d in (chains or {}).items() for c in d["chaines"][:2]),
     ])
-    task = ("Rédige en JSON une synthèse de 4 à 6 phrases pour un responsable : coût total, part des causes non "
-            "précisées, site le plus coûteux, arrêts de sécurité nominaux (perte structurelle, pas des pannes), puis les "
-            "3 mesures prioritaires du parc avec leur coût par an.")
+    task = ("Rédige en JSON une synthèse de 4 à 7 phrases pour un responsable : coût total, part des causes non "
+            "précisées, site le plus coûteux, arrêts de sécurité nominaux (perte structurelle, pas des pannes), les "
+            "chaînes cause -> conséquence prioritaires, puis les 3 mesures prioritaires du parc avec leur coût par an.")
     schema = {"type": "object", "additionalProperties": False, "required": ["synthese"],
               "properties": {"synthese": {"type": "string"}}}
 
@@ -267,3 +272,65 @@ def synthesis(incidents, site_reports: list[dict], fleet, journal: list[dict]) -
         return {"synthese": "Chiffres clés :\n" + facts_text}
 
     return write("Synthèse", task, facts_text, schema, check, fallback, journal)["synthese"], facts_text
+
+
+def cause_sheets(incidents, journal: list[dict]) -> list[dict]:
+    """Fiche diagnostic de chaque thème de cause connue (idée de la branche octave), avec sa criticité
+    Pareto : description, conséquences typiques (heatmap) et mesure préventive avec son mécanisme.
+    Mêmes règles que le reste du rapport : faits calculés, reformulés par le LLM, validés."""
+    sheets = []
+    for asset_type in sorted(incidents["asset_type"].unique()):
+        sub = incidents[incidents["asset_type"] == asset_type]
+        chains = F.chain_stats(sub)
+        for row in F.cause_criticality(sub).itertuples():
+            g = sub[sub["theme_cause"] == row.cause]
+            cons = chains[chains["cause"] == row.cause].head(3)
+            sites = (100 * g["site"].value_counts(normalize=True)).round(1)
+            cons_facts = "\n".join(f"- {c.consequence} : {c.incidents} incidents, coût total {F.euros(c.cout_total)}"
+                                   for c in cons.itertuples()) or "- aucune conséquence classée"
+            facts_text = (f"Cause : {row.cause} ({ASSET_LABELS[asset_type]}). Facteur dominant : {row.facteur or 'non précisé'}.\n"
+                          f"{row.incidents} incidents, coût total {F.euros(row.cout_total)}, coût moyen "
+                          f"{F.euros(row.cout_moyen)}, {row.part_cout_pct} % du coût des causes connues.\n"
+                          f"Sites : " + ", ".join(f"{s} {v} %" for s, v in sites.items()) + ".\n"
+                          f"Maintenance suspectée (hypothèse) : {row.maintenance_suspectee_pct} % des incidents.\n"
+                          f"Exemples de causes extraites : " + " / ".join(g["cause_racine"].dropna().head(3)) + "\n"
+                          f"Conséquences les plus coûteuses :\n{cons_facts}")
+            task = ("Rédige en JSON la fiche de cette cause pour une équipe de maintenance :\n"
+                    "- description : 1 à 2 phrases sur ce qui se passe et pourquoi, avec les mots des faits.\n"
+                    "- consequences : 1 phrase qui reformule les conséquences les plus coûteuses, avec leurs chiffres.\n"
+                    "- type, mesure, mecanisme : une MESURE PRÉVENTIVE ou ORGANISATIONNELLE (quoi, sur quels équipements, à "
+                    "quelle fréquence), pas une réparation ponctuelle, et son mécanisme (pourquoi elle réduit cette cause).")
+            schema = {"type": "object", "additionalProperties": False,
+                      "required": ["description", "consequences", "type", "mesure", "mecanisme"],
+                      "properties": {"description": {"type": "string"}, "consequences": {"type": "string"},
+                                     "type": {"type": "string", "enum": ACTION_TYPES},
+                                     "mesure": {"type": "string"}, "mecanisme": {"type": "string"}}}
+
+            def check(out: dict, cause=row.cause, factor=row.facteur, facts=facts_text, cf=cons_facts) -> dict:
+                return {"description": text_errors(out["description"], facts),
+                        "consequences": text_errors(out["consequences"], cf),
+                        "mesure": measure_errors(out, cause, factor)}
+
+            def fallback(field: str, out: dict, cause=row.cause, factor=row.facteur, cons=cons, n=row.incidents) -> dict:
+                out = dict(out)
+                if field == "description":
+                    out[field] = f"{cause} : {n} incidents" + (f", facteur dominant {factor}." if factor else ".")
+                elif field == "consequences":
+                    out[field] = "Conséquences les plus coûteuses : " + (", ".join(
+                        f"{c.consequence} ({c.incidents} incidents, {F.euros(c.cout_total)})" for c in cons.itertuples())
+                        or "aucune conséquence classée") + "."
+                else:
+                    m = catalogue_measure(cause, factor)
+                    out.update(type=m["type"], mesure=m["mesure"], mecanisme=m["mecanisme"])
+                return out
+
+            out = write(f"Fiche {asset_type} / {row.cause}", task, facts_text, schema, check, fallback, journal)
+            sheets.append({"asset_type": asset_type, "theme_id": row.theme_id, "cause": row.cause, "rang": row.rang,
+                           "criticite": row.criticite, "facteur": row.facteur, "incidents": row.incidents,
+                           "cout_total": row.cout_total, "cout_moyen": row.cout_moyen, "arret_total_h": row.arret_total_h,
+                           "part_cout_pct": row.part_cout_pct, "cumul_cout_pct": row.cumul_cout_pct,
+                           "maintenance_suspectee_pct": row.maintenance_suspectee_pct,
+                           "consequence_principale": row.consequence_principale,
+                           "description": out["description"], "consequences": out["consequences"], "type": out["type"],
+                           "mesure": out["mesure"], "mecanisme": out["mecanisme"], "faits": facts_text})
+    return sheets
