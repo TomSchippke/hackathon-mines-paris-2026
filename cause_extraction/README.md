@@ -14,8 +14,11 @@ python -m cause_extraction          # lancement seul, pour explorer
 | Champ | Contenu |
 |---|---|
 | `composant` | composant touché, parmi une liste fermée (onduleur, pale, boîtier de jonction...) |
-| `cause_racine` | **pourquoi**, en une phrase, en remontant à la cause première (« cause non précisée dans le rapport » si le texte ne la donne pas) |
-| `consequence` | **ce que l'incident a provoqué** (dégât, arrêt, risque), sans la cause |
+| `cause_racine` | **pourquoi**, en une phrase, en remontant à la cause première |
+| `cause_type` | `explicite` (écrite dans la description), `inférée` (désignée par un indice concret de la description ; la météo du jour seule ne suffit pas) ou `inconnue` (sinon, et en cas de doute) |
+| `indice` | extrait de la description **recopié mot pour mot** qui justifie la cause. **Vérifié par le code** : s'il ne figure pas dans le rapport (à 80 % près, sans tenir compte des accents), la cause est annulée et devient `inconnue` (la proposition du LLM est gardée dans `cause_annulee`) |
+| `consequence` | **ce que l'incident a provoqué** (dégât, arrêt, risque), sans la cause ni durée ni montant |
+| `categorie_consequence` | la même conséquence dans une liste fermée : perte de production, arrêt de sécurité automatique, déclenchement de protection / surtension, dégât matériel mineur, dégât majeur / destruction, incendie, aucun impact notable, autre |
 | `facteur_principal` | parmi une liste fermée : corrosion saline, foudre, vent, grêle, chaleur, poussière, nuisibles, sol, usure, défaut de fabrication, maintenance, travaux, défaut électrique, indéterminé |
 | `facteurs_secondaires` | autres facteurs ayant contribué |
 | `lie_vieillissement`, `lie_maintenance` | l'âge ou la maintenance ont-ils joué un rôle ? |

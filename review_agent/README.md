@@ -1,55 +1,50 @@
 # Étape 3 : agent vérificateur
 
-Relit le travail de l'agent d'analyse (`outputs/2_analyse/`) pour s'assurer qu'il est cohérent et
-que le rapport est fiable avant de le présenter. Il est **en lecture seule** : il ne modifie rien.
+Contrôle la cohérence d'ensemble du travail de l'agent d'analyse (`outputs/2_analyse/`) avant de
+présenter le rapport. Les textes eux-mêmes ont déjà été relus et corrigés par le juge de l'analyse
+(`analysis_agent/judge.py`) : le vérificateur ne réécrit rien, il donne un avis et un verdict.
 
 ```bash
 python main.py --steps verification  # ou : python -m review_agent
 ```
 
-## Deux niveaux de contrôle
+## Trois niveaux de contrôle
 
-**1. Contrôles automatiques (code)**, faits avant l'agent et donnés à l'agent dès le départ :
+**1. Contrôles automatiques (code)**, faits avant l'agent :
 
 | Contrôle | Échec si |
 |---|---|
 | rapport produit | l'agent d'analyse n'a pas terminé |
-| budget de clustering | plus de 5 essais pour un type et une dimension (causes, conséquences) |
-| qualité du clustering choisi | stabilité < 0.8, non classés > 15 %, clusters hors 3–40 (pour les causes et pour les conséquences) |
-| chaque cluster dans un thème | un incident classé n'a pas de thème de cause ou de conséquence |
-| causes et conséquences extraites | moins de 95 % des incidents analysés par le LLM |
-| causes non précisées | (information) part des rapports qui ne donnent pas la cause : limite des données, doit être mentionnée dans le rapport |
-| profils A, B, C | un profil absent ou attribué à deux sites du même type |
-| plan de remédiation | un site sans 2 à 8 actions |
-| refus d'outils | (information) nombre de refus dans le journal |
+| budget et qualité des clusterings choisis | plus de 5 essais ; stabilité < 0.8, non classés > 15 %, clusters hors 3–40 |
+| chaque cluster dans un thème | un incident classé n'a pas de thème |
+| causes et conséquences extraites | moins de 95 % des incidents analysés |
+| profils A, B, C | un profil absent ou attribué deux fois ; attribution qui respecte moins d'attentes des profils que la meilleure possible |
+| plans : mesures préventives avec mécanisme | une mesure est une réparation ponctuelle, vague, ou sans mécanisme lié à sa cause |
+| noms des thèmes de causes | un nom de cause contient une conséquence (« arrêt », « perte »...) |
+| (information) | causes non précisées, reprises automatiques par le code, refus d'outils |
 
-**2. Relecture par un agent LLM**, avec ces outils :
+Les problèmes trouvés par ces contrôles deviennent des **constats ciblés** (source : code), avec
+une consigne de correction.
+
+**2. Relecture par un agent LLM, exigeant par consigne.** Il reçoit le rapport, les chiffres
+recalculés de chaque site et les critères des profils, et doit consigner au moins un point pour
+**chaque site et pour la synthèse** (sinon `conclude` est refusé).
 
 | Outil | Ce qu'il fait |
 |---|---|
-| `read_report` | le rapport complet |
-| `read_journal(start, count)` | le journal de l'agent d'analyse, par pages de 20 événements maximum |
-| `site_facts(site)` | chiffres **recalculés** du site à côté de **ce que le rapport affirme** (profil, causes, actions) |
-| `theme_facts(theme_id)` | contenu réel d'un thème (sites, facteurs, exemples), pour vérifier son nom |
-| `record_finding(gravite, element, constat, preuve)` | consigne un point vérifié : `conforme`, ou un problème `bloquant` / `majeur` / `mineur`, avec sa preuve |
-| `conclude(verdict, synthese)` | **outil final** : `valide`, `valide_avec_reserves` ou `a_refaire` |
+| `record_finding(gravite, cible_site, cible_champ, constat, preuve, consigne)` | un point vérifié : `conforme`, ou un problème `bloquant` / `majeur` / `mineur` ; cible = site (ou synthèse) et champ (justification_profil, causes_dominantes, plan, synthese) ; **consigne obligatoire** si bloquant ou majeur |
+| `site_facts(site)`, `theme_facts(theme_id)`, `read_journal(start, count)` | chiffres recalculés, contenu réel d'un thème, journal de l'analyse |
+| `conclude(verdict, synthese)` | **outil final** ; refusé tant qu'un site ou la synthèse n'a aucun point ; `valide` impossible avec un problème majeur ou bloquant ou un contrôle en échec. Si l'agent ne conclut pas, le verdict est calculé par ces mêmes règles (« verdict automatique ») |
 
-Garde-fous du code : impossible de conclure sans avoir lu le rapport ; verdict `valide` refusé
-s'il reste un contrôle en échec ou un constat bloquant ou majeur ; `valide_avec_reserves` refusé
-s'il reste un contrôle en échec ou un constat bloquant.
-
-Ce que l'agent vérifie : chiffres du texte présents dans les données, profils justifiés par des
-faits (et pas une autre attribution plus cohérente), causes dominantes réellement les plus
-fréquentes, actions qui répondent aux causes du site, choix du clustering justifié par les
-scores, incohérences dans le journal.
+**Pourquoi le vérificateur ne fait plus réécrire.** Une première version renvoyait ses constats au
+rédacteur. Avec le petit modèle, ses consignes (« préciser que le profil est basé sur la zone sèche »)
+ont poussé le rédacteur à recopier la description des profils au lieu des mesures. La correction des
+textes est donc confiée au juge, dont chaque correction est validée par le code.
 
 ## Sorties (`outputs/3_verification/`)
 
 | Fichier | Contenu |
 |---|---|
-| `verification.md` | verdict, synthèse, contrôles automatiques, constats triés par gravité |
+| `verification.md` | verdict, contrôles automatiques, problèmes (cible, consigne), points conformes |
 | `verification.json` | la même chose, structurée |
 | `journal.md` | déroulé de la session du vérificateur |
-
-Si le verdict est `a_refaire`, lire les constats, ajuster (prompt ou bornes dans
-`analysis_agent/config.py`) puis relancer `python main.py --steps analyse verification`.

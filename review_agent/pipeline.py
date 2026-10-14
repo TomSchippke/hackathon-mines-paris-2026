@@ -24,7 +24,7 @@ import json
 import pandas as pd
 
 from analysis_agent.report import md_table
-from analysis_agent.tools import profile_indicators, profile_indicators_text
+from analysis_agent.facts import profile_indicators, rank_text
 from llm.agent import dispatch, journal_markdown, run_agent
 from paths import ANALYSIS_DIR, REVIEW_DIR
 
@@ -42,16 +42,17 @@ def render(ws: ReviewWorkspace) -> str:
     lines.append("\n## Problèmes relevés\n")
     if problems:
         order = {"bloquant": 0, "majeur": 1, "mineur": 2}
-        lines.append(md_table(pd.DataFrame(problems).sort_values("gravite", key=lambda g: g.map(order))))
+        lines.append(md_table(pd.DataFrame(problems).sort_values("gravite", key=lambda g: g.map(order))
+                              [["gravite", "source", "cible_site", "cible_champ", "constat", "preuve", "consigne"]]))
     else:
         lines.append("Aucun problème relevé.")
     lines.append("\n## Points vérifiés et conformes\n")
-    lines.append(md_table(pd.DataFrame(checked)[["element", "constat", "preuve"]]) if checked else "Aucun.")
+    lines.append(md_table(pd.DataFrame(checked)[["cible_site", "cible_champ", "constat", "preuve"]]) if checked else "Aucun.")
     return "\n".join(lines) + "\n"
 
 
-def run(max_turns: int = MAX_TURNS) -> str | None:
-    """Lance la vérification. Renvoie le verdict (None si l'agent n'a pas conclu)."""
+def run(max_turns: int = MAX_TURNS) -> str:
+    """Lance la vérification. Renvoie le verdict."""
     ws = ReviewWorkspace(ANALYSIS_DIR)
     failed = [c for c in ws.checks if not c["ok"]]
     print(f"Contrôles automatiques : {len(ws.checks) - len(failed)}/{len(ws.checks)} réussis")
@@ -67,7 +68,7 @@ def run(max_turns: int = MAX_TURNS) -> str | None:
         # pour l'agent, qui se concentre sur la comparaison et le jugement.
         ws.report_read = True
         facts = {site: ws.site_facts(site) for site in sorted(ws.incidents["site"].unique())}
-        indicators = {a: profile_indicators_text(profile_indicators(ws.incidents[ws.incidents["asset_type"] == a]))
+        indicators = {a: rank_text(profile_indicators(ws.incidents[ws.incidents["asset_type"] == a]))
                       for a in sorted(ws.incidents["asset_type"].unique())}
         task = ("CONTRÔLES AUTOMATIQUES (faits par le code) :\n" + json.dumps(ws.checks, ensure_ascii=False)
                 + "\n\nRAPPORT À VÉRIFIER :\n" + ws.report_md
@@ -79,7 +80,12 @@ def run(max_turns: int = MAX_TURNS) -> str | None:
                   "Vérifie, consigne chaque problème avec record_finding, puis appelle conclude.")
         tools = [t for t in TOOLS if t["function"]["name"] != "read_report"]
         journal, _ = run_agent(SYSTEM_PROMPT, task, tools, lambda name, args: dispatch(ws.tools, name, args),
-                               is_done=lambda: ws.verdict is not None, max_turns=max_turns)
+                               is_done=lambda: ws.verdict is not None, max_turns=max_turns, role="review",
+                               nudge=lambda: (f"Consigne encore un point pour : {ws.uncovered()}, puis appelle conclude."
+                                              if ws.uncovered() else "Appelle conclude."))
+        if ws.verdict is None:
+            ws.verdict = ws.rule_verdict()
+            journal.append({"tour": 0, "type": "automatique", "texte": ws.verdict["synthese"]})
 
     REVIEW_DIR.mkdir(parents=True, exist_ok=True)
     (REVIEW_DIR / "journal.md").write_text(journal_markdown(journal, "Journal du vérificateur"), encoding="utf-8")
@@ -90,8 +96,8 @@ def run(max_turns: int = MAX_TURNS) -> str | None:
 
     by_level = pd.Series([f["gravite"] for f in ws.findings]).value_counts().to_dict()
     print(f"Constats : {by_level or 'aucun'}")
-    print(f"Verdict : {ws.verdict['verdict'] if ws.verdict else 'non rendu'}  ->  {REVIEW_DIR / 'verification.md'}")
-    return ws.verdict["verdict"] if ws.verdict else None
+    print(f"Verdict : {ws.verdict['verdict']}  ->  {REVIEW_DIR / 'verification.md'}")
+    return ws.verdict["verdict"]
 
 
 def main() -> None:

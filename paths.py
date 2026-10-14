@@ -4,6 +4,7 @@
     ├── 1_extraction/      étape 1 (pdf)          : incidents_full.csv          ← à utiliser
     ├── 2_analyse/         étape 2 (analyse)      : rapport, thèmes, causes     ← à utiliser
     ├── 3_verification/    étape 3 (verification) : avis de l'agent vérificateur ← à utiliser
+    ├── validation/        causes inférées à vérifier à la main (jamais écrasé)
     ├── exploration/       lancements manuels des modules (topic_modeling, cause_extraction)
     └── cache/             interne aux étapes, ne pas lire ni modifier à la main
 """
@@ -21,6 +22,9 @@ INCIDENTS_FULL = EXTRACTION_DIR / "incidents_full.csv"
 ANALYSIS_DIR = OUTPUTS / "2_analyse"
 ANALYSIS_REPORT = ANALYSIS_DIR / "rapport_analyse.md"
 ANALYSIS_JOURNAL = ANALYSIS_DIR / "journal.json"
+
+# Validation manuelle des causes inférées : rempli à la main, jamais écrasé par la pipeline
+INFERENCE_VALIDATION = OUTPUTS / "validation" / "inferences_a_valider.csv"
 
 # Étape 3 : agent vérificateur
 REVIEW_DIR = OUTPUTS / "3_verification"

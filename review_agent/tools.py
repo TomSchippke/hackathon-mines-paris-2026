@@ -16,13 +16,16 @@ from pathlib import Path
 
 import pandas as pd
 
-from analysis_agent.config import (ACTIONS_PER_SITE, ASSET_TYPES, DIMENSIONS, MAX_CLUSTERING_RUNS,
+from analysis_agent.config import CONSEQUENCE_WORDS
+from analysis_agent.writing import measure_errors
+from analysis_agent import facts as F
+from analysis_agent.config import (ASSET_TYPES, DIMENSIONS, MAX_CLUSTERING_RUNS,
                                    MAX_UNCLASSIFIED_PCT, MIN_STABILITY, N_TOPICS_RANGE, SITE_PROFILES)
 from cause_extraction.config import CAUSE_INCONNUE
 from analysis_agent.tools import percent
 from llm.agent import ToolError
 
-from .config import GRAVITES, JOURNAL_PAGE_MAX, RESULT_MAX_CHARS, VERDICTS
+from .config import FIELDS, GRAVITES, JOURNAL_PAGE_MAX, RESULT_MAX_CHARS, TARGETS_EXTRA, VERDICTS
 
 
 def truncate(value, limit: int = RESULT_MAX_CHARS):
@@ -48,6 +51,7 @@ class ReviewWorkspace:
         self.findings: list[dict] = []
         self.verdict: dict | None = None
         self.report_read = False
+        self.sites = sorted(self.incidents["site"].unique())
         self.checks = self.automatic_checks()
 
     @property
@@ -100,9 +104,38 @@ class ReviewWorkspace:
                 profiles = sorted(s["profil"] for s in self.report["sites"] if s["site"] in sites)
                 check(f"{asset_type} : profils A, B, C attribués une fois chacun",
                       profiles == sorted(SITE_PROFILES[asset_type]), f"profils attribués : {profiles}")
-            counts = {s["site"]: len(s["plan_remediation"]) for s in self.report["sites"]}
-            check("plan de remédiation pour chaque site",
-                  all(ACTIONS_PER_SITE[0] <= n <= ACTIONS_PER_SITE[1] for n in counts.values()), str(counts))
+                indicators = F.profile_indicators(self.incidents[self.incidents["asset_type"] == asset_type])
+                chosen = {s["site"]: s["profil"] for s in self.report["sites"] if s["site"] in sites}
+                best = F.best_assignments(indicators, asset_type)
+                score, top = F.assignment_score(indicators, asset_type, chosen), F.assignment_score(indicators, asset_type, best[0])
+                check(f"{asset_type} : attribution des profils cohérente avec les attentes des profils", score == top,
+                      f"{score} attentes respectées (maximum possible {top}) ; meilleure(s) attribution(s) : {best}")
+            bad_plans = {}
+            for s in self.report["sites"]:
+                for p in s["plan"]:
+                    errors = measure_errors({"mesure": p["action"], "mecanisme": p.get("mecanisme", "")}, p["cause"],
+                                            p.get("facteur", ""))
+                    if errors:
+                        bad_plans.setdefault(s["site"], []).append(p["cause"])
+                        self.auto_finding("majeur", s["site"], "plan", f"mesure non préventive ou mal justifiée pour "
+                                          f"« {p['cause']} » : {p['action']}", "; ".join(errors),
+                                          f"Pour « {p['cause']} », propose une mesure préventive à l'échelle du site "
+                                          "avec son mécanisme : " + "; ".join(errors))
+            check("plans : mesures préventives avec mécanisme", not bad_plans,
+                  f"mesures à revoir : {bad_plans}" if bad_plans else "toutes les mesures sont préventives et justifiées")
+            for s in self.report["sites"]:
+                origin = s.get("origine_causes_dominantes", {})
+                if origin.get("inférée", 0) > 50:
+                    self.auto_finding("mineur", s["site"], "causes_dominantes",
+                                      f"les causes dominantes reposent surtout sur des inférences ({origin['inférée']} %)",
+                                      str(origin), "Précise que ces causes sont majoritairement inférées.")
+            themes = pd.read_csv(self.dir / "themes.csv") if (self.dir / "themes.csv").exists() else pd.DataFrame()
+            mixed = themes.loc[(themes.get("dimension") == "cause") & themes["name"].str.contains(
+                CONSEQUENCE_WORDS, case=False, regex=True), "name"].tolist() if len(themes) else []
+            check("noms des thèmes de causes sans conséquence", not mixed, f"à renommer : {mixed}" if mixed else "ok")
+        auto = [e["texte"] for e in self.journal if e["type"] == "automatique"]
+        check("reprises automatiques par le code (information)", True,
+              f"{len(auto)} : " + " | ".join(auto) if auto else "aucune : l'agent et le rédacteur ont tout fait")
         calls = [e for e in self.journal if e["type"] == "outil"]
         refused = [e for e in calls if not e["resultat"].get("ok")]
         check("refus d'outils dans le journal (information)", True,
@@ -167,21 +200,52 @@ class ReviewWorkspace:
         themes = sorted(set(self.incidents["theme_cause_id"].dropna()) | set(self.incidents["theme_consequence_id"].dropna()))
         raise ToolError(f"thème inconnu : {theme_id!r}. Thèmes : {themes}")
 
-    def record_finding(self, gravite: str, element: str, constat: str, preuve: str) -> dict:
+    def auto_finding(self, gravite: str, site: str, champ: str, constat: str, preuve: str, consigne: str) -> None:
+        """Constat produit par un contrôle déterministe (pas par l'agent)."""
+        self.findings.append({"gravite": gravite, "cible_site": site, "cible_champ": champ, "constat": constat,
+                              "preuve": preuve, "consigne": consigne, "source": "code"})
+
+    def record_finding(self, gravite: str, cible_site: str, cible_champ: str, constat: str, preuve: str,
+                       consigne: str = "") -> dict:
         if gravite not in GRAVITES:
             raise ToolError(f"gravite doit valoir : {GRAVITES}")
-        for name, value in {"element": element, "constat": constat, "preuve": preuve}.items():
+        if cible_site not in self.sites + TARGETS_EXTRA:
+            raise ToolError(f"cible_site doit valoir l'un de : {self.sites + TARGETS_EXTRA}")
+        if cible_champ not in FIELDS:
+            raise ToolError(f"cible_champ doit valoir l'un de : {FIELDS}")
+        for name, value in {"constat": constat, "preuve": preuve}.items():
             if not isinstance(value, str) or not value.strip():
                 raise ToolError(f"{name} ne doit pas être vide")
-        self.findings.append({"gravite": gravite, "element": element.strip(), "constat": constat.strip(),
-                              "preuve": preuve.strip()})
-        return {"constats_enregistres": len(self.findings)}
+        if gravite in ("bloquant", "majeur") and not str(consigne).strip():
+            raise ToolError("un problème bloquant ou majeur doit avoir une consigne de correction précise")
+        self.findings.append({"gravite": gravite, "cible_site": cible_site, "cible_champ": cible_champ,
+                              "constat": constat.strip(), "preuve": preuve.strip(), "consigne": str(consigne).strip(),
+                              "source": "agent"})
+        missing = self.uncovered()
+        return {"constats_enregistres": len(self.findings), "cibles_non_encore_verifiees": missing}
+
+    def uncovered(self) -> list[str]:
+        """Sites (et synthèse) pour lesquels l'agent n'a encore rien consigné."""
+        covered = {f["cible_site"] for f in self.findings if f.get("source") == "agent"}
+        return [t for t in self.sites + ["synthese"] if t not in covered]
+
+    def rule_verdict(self) -> dict:
+        """Verdict calculé par les règles, quand l'agent n'a pas conclu."""
+        failed = [c for c in self.checks if not c["ok"]]
+        levels = {f["gravite"] for f in self.findings}
+        verdict = ("a_refaire" if failed or "bloquant" in levels else
+                   "valide_avec_reserves" if "majeur" in levels else "valide")
+        return {"verdict": verdict, "synthese": "VERDICT AUTOMATIQUE (l'agent n'a pas conclu) : calculé à partir des "
+                f"contrôles ({len(failed)} en échec) et des constats ({sorted(levels) or 'aucun'})."}
 
     def conclude(self, verdict: str, synthese: str) -> dict:
         if verdict not in VERDICTS:
             raise ToolError(f"verdict doit valoir : {VERDICTS}")
         if self.report_md is not None and not self.report_read:
             raise ToolError("lire le rapport (read_report) avant de conclure")
+        if self.report_md is not None and self.uncovered():
+            raise ToolError(f"vérification incomplète : consigne au moins un point (conforme ou problème) pour "
+                            f"{self.uncovered()} avant de conclure")
         failed = [c["controle"] for c in self.checks if not c["ok"]]
         blocking = [f for f in self.findings if f["gravite"] == "bloquant"]
         major = [f for f in self.findings if f["gravite"] == "majeur"]
@@ -224,9 +288,12 @@ TOOLS = [
                                                 "un problème (bloquant, majeur, mineur), avec sa preuve.",
         "parameters": {"type": "object", "properties": {
             "gravite": {"type": "string", "enum": GRAVITES},
-            "element": {"type": "string", "description": "partie concernée (site, thème, clustering...)"},
-            "constat": {"type": "string"}, "preuve": {"type": "string", "description": "chiffres ou extrait"}},
-            "required": ["gravite", "element", "constat", "preuve"], "additionalProperties": False}}},
+            "cible_site": {"type": "string", "description": "site concerné, ou « synthese », ou « general »"},
+            "cible_champ": {"type": "string", "enum": FIELDS},
+            "constat": {"type": "string"}, "preuve": {"type": "string", "description": "chiffres ou extrait"},
+            "consigne": {"type": "string", "description": "correction précise à faire (obligatoire si bloquant ou majeur)"}},
+            "required": ["gravite", "cible_site", "cible_champ", "constat", "preuve", "consigne"],
+            "additionalProperties": False}}},
     {"type": "function", "function": {
         "name": "conclude", "description": "Outil final : verdict et synthèse de la vérification.",
         "parameters": {"type": "object", "properties": {

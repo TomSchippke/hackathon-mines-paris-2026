@@ -17,6 +17,8 @@ outputs/
 ├── 3_verification/          ← À UTILISER
 │   ├── verification.md          verdict, contrôles automatiques, constats du vérificateur
 │   └── journal.md               déroulé de la vérification
+├── validation/              ← À REMPLIR À LA MAIN (jamais écrasé)
+│   └── inferences_a_valider.csv 40 causes inférées à juger (colonne verdict_humain : oui / non)
 ├── exploration/             ← lancements manuels (python -m topic_modeling / cause_extraction)
 └── cache/                   ← INTERNE, ne pas lire ni modifier
     ├── ocr_doctr/               lectures OCR brutes des scans (étape 1)

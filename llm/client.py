@@ -30,6 +30,21 @@ def env(name: str) -> str:
     return os.environ[name]
 
 
+# Modèle de chat par usage. Chaque usage peut avoir son propre déploiement Azure dans le .env
+# (AZURE_OPENAI_CHAT_DEPLOYMENT_EXTRACTION, ..._ANALYSIS, ..._WRITING, ..._REVIEW) ; sans cette
+# variable, c'est AZURE_OPENAI_CHAT_DEPLOYMENT (le même modèle partout).
+ROLES = ("extraction", "analysis", "writing", "review")
+
+
+def deployment(role: str) -> str:
+    """Déploiement Azure du modèle de chat pour un usage : extraction (petit modèle, beaucoup
+    d'appels), analysis (décisions de l'agent), writing (rédaction du rapport), review (vérification)."""
+    if role not in ROLES:
+        raise ValueError(f"usage inconnu : {role} ({ROLES})")
+    env("AZURE_OPENAI_CHAT_DEPLOYMENT")  # charge le .env
+    return os.environ.get(f"AZURE_OPENAI_CHAT_DEPLOYMENT_{role.upper()}") or os.environ["AZURE_OPENAI_CHAT_DEPLOYMENT"]
+
+
 @lru_cache(maxsize=1)
 def azure_client():
     try:  # réseau d'entreprise avec inspection SSL : magasin de certificats de l'OS
@@ -77,13 +92,14 @@ def with_retry(call, max_attempts: int = 10):
             time.sleep(5 * attempt)
 
 
-def chat(messages: list[dict], *, tools: list[dict] | None = None, response_format: dict | None = None,
+def chat(messages: list[dict], *, role: str, tools: list[dict] | None = None, response_format: dict | None = None,
          temperature: float = 0.0) -> dict:
-    """Un appel au modèle de chat, mis en cache selon le contenu exact de la requête.
+    """Un appel au modèle de chat de l'usage `role` (voir deployment), mis en cache selon le contenu
+    exact de la requête.
 
     Renvoie {"content": texte ou None, "tool_calls": [{"id", "name", "arguments"}]}.
     """
-    request = {"model": env("AZURE_OPENAI_CHAT_DEPLOYMENT"), "messages": messages, "temperature": temperature}
+    request = {"model": deployment(role), "messages": messages, "temperature": temperature}
     if tools:
         request["tools"] = tools
     if response_format:

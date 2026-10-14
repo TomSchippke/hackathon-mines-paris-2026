@@ -28,6 +28,7 @@ from .client import chat
 NUDGE = "Continue en appelant les outils. Termine en appelant l'outil final."
 KEEP_FULL_RESULTS = 6        # derniers résultats d'outils envoyés en entier au modèle
 MAX_SAME_REFUSAL = 3         # un même appel refusé 3 fois : la session s'arrête (l'agent tourne en rond)
+MAX_SAME_CALL = 3            # un même appel (même réussi) répété 3 fois : idem
 OLD_RESULT_CHARS = 400       # taille des résultats plus anciens, abrégés
 
 
@@ -46,17 +47,21 @@ class ToolError(Exception):
 
 
 def run_agent(system_prompt: str, task: str, tools: list[dict], execute: Callable[[str, dict], dict],
-              is_done: Callable[[], bool], max_turns: int) -> tuple[list[dict], bool]:
+              is_done: Callable[[], bool], max_turns: int, role: str = "analysis",
+              nudge: Callable[[], str] | None = None) -> tuple[list[dict], bool]:
     """Fait travailler un agent. Renvoie (journal, terminé correctement ?).
 
     `execute(nom, arguments)` exécute un outil et renvoie un dict sérialisable en JSON.
-    `is_done()` dit si l'outil final a réussi.
+    `is_done()` dit si l'objectif est atteint. `role` : usage du modèle (voir llm.client.deployment).
+    `nudge()` : relance envoyée quand l'agent répond par du texte au lieu d'agir (par exemple la
+    liste de ce qui reste à faire) ; par défaut, NUDGE.
     """
     messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": task}]
     journal: list[dict] = []
     refusals: dict[str, int] = {}  # appel exact (outil + arguments) -> nombre de refus
+    calls: dict[str, int] = {}     # appel exact -> nombre d'appels (réussis ou non)
     for turn in range(1, max_turns + 1):
-        answer = chat(compact(messages), tools=tools)
+        answer = chat(compact(messages), role=role, tools=tools)
         assistant = {"role": "assistant", "content": answer["content"]}
         if answer["tool_calls"]:
             assistant["tool_calls"] = [{"id": c["id"], "type": "function",
@@ -66,7 +71,7 @@ def run_agent(system_prompt: str, task: str, tools: list[dict], execute: Callabl
         if answer["content"]:
             journal.append({"tour": turn, "type": "raisonnement", "texte": answer["content"]})
         if not answer["tool_calls"]:
-            messages.append({"role": "user", "content": NUDGE})
+            messages.append({"role": "user", "content": nudge() if nudge else NUDGE})
             continue
 
         for call in answer["tool_calls"]:
@@ -75,8 +80,9 @@ def run_agent(system_prompt: str, task: str, tools: list[dict], execute: Callabl
                 result = execute(call["name"], arguments)
             except json.JSONDecodeError:
                 arguments, result = call["arguments"], {"ok": False, "refus": "arguments JSON invalides"}
+            signature = call["name"] + json.dumps(arguments, sort_keys=True, ensure_ascii=False)
+            calls[signature] = calls.get(signature, 0) + 1
             if not result.get("ok"):
-                signature = call["name"] + json.dumps(arguments, sort_keys=True, ensure_ascii=False)
                 refusals[signature] = refusals.get(signature, 0) + 1
                 if refusals[signature] > 1:
                     result["attention"] = (f"cet appel exact a déjà été refusé {refusals[signature]} fois pour la même "
@@ -91,6 +97,10 @@ def run_agent(system_prompt: str, task: str, tools: list[dict], execute: Callabl
         if refusals and max(refusals.values()) >= MAX_SAME_REFUSAL:
             journal.append({"tour": turn, "type": "fin", "texte": f"arrêté au tour {turn} : l'agent répète un appel "
                                                                   f"refusé {MAX_SAME_REFUSAL} fois (il tourne en rond)"})
+            return journal, False
+        if max(calls.values(), default=0) >= MAX_SAME_CALL:
+            journal.append({"tour": turn, "type": "fin", "texte": f"arrêté au tour {turn} : l'agent répète le même appel "
+                                                                  f"{MAX_SAME_CALL} fois (il tourne en rond)"})
             return journal, False
     journal.append({"tour": max_turns, "type": "fin", "texte": f"arrêté après {max_turns} tours sans terminer"})
     return journal, False

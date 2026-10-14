@@ -25,7 +25,10 @@ Usage :
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
+import re
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -35,7 +38,7 @@ from tqdm import tqdm
 from llm.client import chat
 from paths import CAUSES_DIR, INCIDENTS_CAUSES, INCIDENTS_FULL
 
-from .config import RESPONSE_FORMAT, SYSTEM_PROMPT, WORKERS
+from .config import CAUSE_INCONNUE, QUOTE_MIN_MATCH, RESPONSE_FORMAT, SYSTEM_PROMPT, UNKNOWN_CAUSE_PATTERN, WORKERS
 
 FIELDS = list(RESPONSE_FORMAT["json_schema"]["schema"]["properties"])
 
@@ -53,15 +56,44 @@ def incident_prompt(row) -> str:
             f"Description : {row.text}")
 
 
+def simplify(text: str) -> str:
+    """Minuscules, sans accents ni ponctuation : la comparaison tolère les petites variations de recopie."""
+    text = unicodedata.normalize("NFKD", (text or "").lower()).encode("ascii", "ignore").decode()
+    return re.sub(r"[^a-z0-9]+", " ", text).strip()
+
+
+def quote_found(quote: str, text: str) -> bool:
+    """L'extrait cité par le LLM figure-t-il dans le rapport (à QUOTE_MIN_MATCH près) ?"""
+    q, t = simplify(quote), simplify(text)
+    if len(q.split()) < 3:
+        return False
+    match = difflib.SequenceMatcher(None, q, t, autojunk=False).find_longest_match(0, len(q), 0, len(t))
+    return match.size >= QUOTE_MIN_MATCH * len(q)
+
+
+def normalize_cause(result: dict, text: str) -> dict:
+    """Contrôles déterministes de la cause renvoyée par le LLM :
+    - une seule valeur pour une cause inconnue, quelle que soit sa formulation ;
+    - une cause explicite ou inférée sans indice vérifiable dans le rapport est annulée (inconnue)."""
+    result["indice_verifie"] = False
+    if result["cause_type"] != "inconnue" and not UNKNOWN_CAUSE_PATTERN.search(result["cause_racine"] or ""):
+        result["indice_verifie"] = quote_found(result.get("indice", ""), text)
+    if not result["indice_verifie"]:
+        if result["cause_type"] != "inconnue":
+            result["cause_annulee"] = result["cause_racine"]  # gardée pour transparence
+        result.update(cause_racine=CAUSE_INCONNUE, cause_type="inconnue", facteur_principal="indéterminé")
+    return result
+
+
 def analyse(row) -> dict:
     """Analyse d'un incident ; en cas d'échec, les champs sont vides et l'erreur est notée."""
     try:
         answer = chat([{"role": "system", "content": SYSTEM_PROMPT},
                        {"role": "user", "content": incident_prompt(row)}],
-                      response_format=RESPONSE_FORMAT)
+                      role="extraction", response_format=RESPONSE_FORMAT)
         result = json.loads(answer["content"])
         result["facteurs_secondaires"] = " | ".join(result["facteurs_secondaires"])
-        return {**result, "erreur_analyse": ""}
+        return {**normalize_cause(result, row.text), "erreur_analyse": ""}
     except Exception as e:  # filtre de contenu Azure, réponse invalide... : signalé, n'arrête rien
         return {**{f: None for f in FIELDS}, "erreur_analyse": f"{type(e).__name__}: {e}"[:300]}
 

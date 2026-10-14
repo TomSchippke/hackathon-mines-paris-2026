@@ -3,7 +3,7 @@
   1. pdf           extraction des rapports PDF (digitaux + scans OCR)  -> outputs/1_extraction/
   2. analyse       agent d'analyse : clustering, causes, thèmes, profils de site, rapport
                                                                        -> outputs/2_analyse/
-  3. verification  agent vérificateur : relit le journal et le rapport -> outputs/3_verification/
+  3. verification  contrôles du code + agent vérificateur (avis)      -> outputs/3_verification/
 
 Les étapes 2 et 3 appellent Azure OpenAI (il faut le .env). Chaque étape garde un cache dans
 outputs/cache/ : relancer ne refait que ce qui a changé, et une session d'agent déjà faite est
@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 
 from analysis_agent.pipeline import run as run_analysis
-from paths import DATA_CSV
+from paths import DATA_CSV, REVIEW_DIR
 from pdf_pipeline.pipeline import run as run_pdf
 from review_agent import config as review_config
 from review_agent.pipeline import run as run_review
@@ -50,6 +50,8 @@ def main() -> None:
             if not run_analysis(args.max_turns_analyse) and "verification" in args.steps:
                 print("La vérification va quand même tourner : elle signalera ce qui manque.")
         elif step == "verification":
+            for old in REVIEW_DIR.glob("*_avant_reecriture*"):  # restes d'anciennes versions de la pipeline
+                old.unlink()
             run_review(args.max_turns_verification)
         print(f"-> étape {step} terminée en {time.time() - start:.0f} s")
 

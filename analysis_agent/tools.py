@@ -6,7 +6,8 @@ Chaque outil est une méthode de AnalysisWorkspace :
   - tous les chiffres qu'il renvoie sont calculés par le code, jamais par le LLM.
 
 Deux clusterings par type d'installation, sur les phrases extraites par le LLM : les CAUSES
-(pourquoi) et les CONSÉQUENCES (ce que l'incident a provoqué). liens_cause_consequence les relie.
+(pourquoi) et les CONSÉQUENCES (ce que l'incident a provoqué). Les causes inconnues (« cause non
+précisée ») sont exclues du clustering des causes et comptées à part.
 
 Outils, dans l'ordre d'utilisation :
     overview                 vue d'ensemble des données et profils de site
@@ -16,9 +17,8 @@ Outils, dans l'ordre d'utilisation :
     topic_details            exemples et statistiques de clusters
     define_themes            range des clusters dans des thèmes nommés
     remove_theme             défait un thème
-    liens_cause_consequence  quelles causes mènent à quelles conséquences
-    site_evidence            statistiques par site pour l'association aux profils et la remédiation
-    write_report             rédaction du rapport final (outil final)
+    site_evidence            points distinctifs et statistiques de chaque site
+    assign_profiles          associe chaque site à un profil A, B, C (outil final de la phase profils)
 """
 
 from __future__ import annotations
@@ -32,11 +32,11 @@ from llm.agent import ToolError
 from paths import CACHE_DIR
 from topic_modeling.config import FRENCH_STOPWORDS, NGRAM_RANGE, UMAP_PARAMS
 
-from .config import (ACTIONS_PER_SITE, ASSET_TYPES, DIMENSIONS, EXAMPLE_MAX_CHARS, MAX_CLUSTERING_RUNS,
+from . import facts as F
+from .config import (CONSEQUENCE_WORDS, MERGE_SIMILARITY, MIN_CHOSEN_DBCV, ASSET_TYPES, DIMENSIONS, EXAMPLE_MAX_CHARS, EXTRA_STOPWORDS, MAX_CLUSTERING_RUNS,
                      MAX_THEME_NAME_CHARS, MAX_THEMES_PER_CALL, MAX_TOPICS_PER_CALL, MAX_UNCLASSIFIED_PCT,
                      MERGE_MIN_COHESION_RATIO, MIN_CLUSTER_SIZE_RANGE, MIN_STABILITY, N_DESCRIPTIONS,
-                     N_EXAMPLES, N_TOPICS_RANGE, NEUTRAL_FACTORS, PROFILE_CRITERIA, SITE_PROFILES,
-                     STABILITY_SEEDS, TOP_PAIRS)
+                     N_EXAMPLES, N_TOPICS_RANGE, NEUTRAL_FACTORS, SITE_PROFILES, STABILITY_SEEDS)
 
 SEASONS = {12: "hiver", 1: "hiver", 2: "hiver", 3: "printemps", 4: "printemps", 5: "printemps",
            6: "été", 7: "été", 8: "été", 9: "automne", 10: "automne", 11: "automne"}
@@ -57,7 +57,7 @@ def keywords_by_cluster(texts: list[str], labels: np.ndarray, n: int = 8) -> dic
     """Mots-clés de chaque cluster (c-TF-IDF, comme BERTopic) : fréquents dans le cluster, rares ailleurs."""
     from sklearn.feature_extraction.text import CountVectorizer
 
-    vectorizer = CountVectorizer(stop_words=FRENCH_STOPWORDS, ngram_range=NGRAM_RANGE,
+    vectorizer = CountVectorizer(stop_words=FRENCH_STOPWORDS + EXTRA_STOPWORDS, ngram_range=NGRAM_RANGE,
                                  token_pattern=r"(?u)\b[^\W\d_][^\W\d_]+\b")
     counts = vectorizer.fit_transform(texts)
     clusters = sorted(set(labels))
@@ -68,11 +68,15 @@ def keywords_by_cluster(texts: list[str], labels: np.ndarray, n: int = 8) -> dic
     return {c: [vocab[i] for i in scores[k].argsort()[::-1][:n]] for k, c in enumerate(clusters)}
 
 
+GENERIC = re.compile(r"\b(?:" + "|".join(map(re.escape, EXTRA_STOPWORDS)) + r")\b", re.IGNORECASE)
+
+
 def normalize_phrase(text: str) -> str:
-    """Phrase utilisée pour le clustering : sans les nombres ni leurs unités (« arrêt de 3.2 heures »
-    -> « arrêt de »), qui sinon séparent des conséquences identiques."""
+    """Phrase utilisée pour le clustering : sans les nombres et leurs unités (« arrêt de 3.2 heures »)
+    ni les mots génériques (« éolienne », « pendant »), qui sinon forment de faux clusters."""
     text = re.sub(r"\d+(?:[.,]\d+)?\s*(?:heures?|h\b|€|euros?|%|jours?|minutes?|min\b)?", " ", str(text))
-    return re.sub(r"\s+", " ", text).strip(" ,.;:-")
+    text = GENERIC.sub(" ", text)
+    return re.sub(r"\s+", " ", text).strip(" ,.;:-") or "?"
 
 
 def check_choice(value, allowed, name: str):
@@ -109,41 +113,6 @@ def quality_problems(stability: float, unclassified: float, n_topics: int) -> li
     return problems
 
 
-def profile_indicators(incidents: pd.DataFrame) -> dict[str, dict]:
-    """Critères des profils de site mesurés sur chaque site, avec le rang du site (1 = valeur la plus
-    élevée parmi les sites du même type). Utilisé par l'agent d'analyse, le rapport et le vérificateur.
-
-    `incidents` : incidents d'un type d'installation, avec les colonnes extraites par le LLM.
-    Renvoie {critère: {site: {"valeur": ..., "rang": ...}}}.
-    """
-    factors = (incidents["facteur_principal"].fillna("") + " | " + incidents["facteurs_secondaires"].fillna(""))
-    values: dict[str, pd.Series] = {}
-    for criterion, names in PROFILE_CRITERIA.items():
-        hit = factors.apply(lambda f: any(n in f for n in names))
-        values[f"{criterion} (% incidents)"] = 100 * hit.groupby(incidents["site"]).mean()
-    flag = lambda col: incidents[col].astype(str).str.lower().isin(["true", "1"])
-    values["usure / vieillissement (% incidents)"] = 100 * flag("lie_vieillissement").groupby(incidents["site"]).mean()
-    values["lié à la maintenance (% incidents)"] = 100 * flag("lie_maintenance").groupby(incidents["site"]).mean()
-    values["incidents sévères (%)"] = 100 * (incidents["severity"] == "sévère").groupby(incidents["site"]).mean()
-    values["coût moyen (€)"] = incidents.groupby("site")["estimated_cost_eur"].mean()
-    out = {}
-    for criterion, v in values.items():
-        ranks = v.round(1).rank(ascending=False, method="min").astype(int)
-        tied = v.round(1).nunique() == 1  # tous les sites égaux : aucun rang n'a de sens
-        out[criterion] = {site: {"valeur": round(float(v[site]), 1), "rang": None if tied else int(ranks[site])}
-                          for site in v.index}
-    return out
-
-
-def profile_indicators_text(indicators: dict[str, dict]) -> dict[str, str]:
-    """Version compacte, facile à comparer : « Est-1 15.0 (1er) | Est-2 8.0 (2e) | Ouest-1 0.0 (3e) »."""
-    def rank(r):
-        return "égaux" if r is None else f"{r}{'er' if r == 1 else 'e'}"
-    return {criterion: " | ".join(f"{site} {x['valeur']} ({rank(x['rang'])})"
-                                  for site, x in sorted(sites.items(), key=lambda s: s[1]["rang"] or 0))
-            for criterion, sites in indicators.items()}
-
-
 def check_list(value, max_items: int, name: str) -> list:
     if not isinstance(value, list) or not 1 <= len(value) <= max_items:
         raise ToolError(f"{name} doit être une liste de 1 à {max_items} éléments")
@@ -165,7 +134,8 @@ class AnalysisWorkspace:
         self.runs: dict[str, dict] = {}         # essais de clustering, par run_id
         self.selected: dict[str, dict] = {}     # "type/dim" -> {"run_id", "justification"}
         self.themes: dict[str, dict] = {}       # theme_id -> thème
-        self.report: dict | None = None         # contenu rédigé par l'agent (write_report)
+        self.profiles: dict[str, dict] | None = None  # site -> {"profil", "raisonnement"} (assign_profiles)
+        self.report: dict | None = None         # contenu du rapport (rédigé ensuite par writing.py)
         self._theme_count = 0
 
     @property
@@ -173,8 +143,10 @@ class AnalysisWorkspace:
         return {"overview": self.overview, "extract_causes": self.extract_causes,
                 "run_clustering": self.run_clustering, "select_clustering": self.select_clustering,
                 "topic_details": self.topic_details, "define_themes": self.define_themes,
-                "remove_theme": self.remove_theme, "liens_cause_consequence": self.liens_cause_consequence,
-                "site_evidence": self.site_evidence, "write_report": self.write_report}
+                "define_theme": self.define_theme, "compare_clusters": self.compare_clusters,
+                "merge_themes": self.merge_themes,
+                "remove_theme": self.remove_theme, "site_evidence": self.site_evidence,
+                "assign_profiles": self.assign_profiles}
 
     # ---- état et vérifications -----------------------------------------------------------------
 
@@ -204,10 +176,17 @@ class AnalysisWorkspace:
             column = DIMENSIONS[dimension]
             phrases = self.causes.loc[self.positions(asset_type), column]
             phrases = phrases[phrases.notna() & (phrases.astype(str).str.strip() != "")]
+            if dimension == "cause":  # causes inconnues ou incertaines : exclues du clustering, comptées à part
+                phrases = phrases[~self.uncertain_or_unknown(phrases.index)]
             emb = embed_texts([normalize_phrase(p) for p in phrases], CACHE_DIR)
             emb = emb / np.maximum(np.linalg.norm(emb, axis=1, keepdims=True), 1e-12)
             self.vectors[k] = (phrases.index.to_numpy(), emb)
         return self.vectors[k]
+
+    def uncertain_or_unknown(self, positions) -> np.ndarray:
+        """Incidents sans cause exploitable : inconnue, ou inférée avec une confiance faible."""
+        c = self.causes.loc[positions]
+        return ((c["cause_type"] == "inconnue") | ((c["cause_type"] == "inférée") & (c["confiance"] == "faible"))).to_numpy()
 
     def chosen(self, asset_type: str, dimension: str) -> dict:
         k = self.key(asset_type, dimension)
@@ -251,7 +230,10 @@ class AnalysisWorkspace:
                 out.loc[run["positions"], f"cluster_{d}"] = run["labels"]
                 out.loc[run["positions"], f"theme_{d}_id"] = [
                     self.theme_of(asset_type, d, int(t)) if t != -1 else None for t in run["labels"]]
-            out[f"theme_{d}"] = out[f"theme_{d}_id"].map(names)
+            out[f"theme_{d}"] = out[f"theme_{d}_id"].map(names).fillna(F.UNCLASSIFIED)
+        if "cause_type" in out:
+            out.loc[(out["cause_type"] == "inférée") & (out["confiance"] == "faible"), "theme_cause"] = F.UNCERTAIN
+            out.loc[out["cause_type"] == "inconnue", "theme_cause"] = F.UNKNOWN
         return out
 
     # ---- outils ----------------------------------------------------------------------------------
@@ -282,6 +264,7 @@ class AnalysisWorkspace:
         examples = ok.sample(min(3, len(ok)), random_state=0)
         return {"incidents_analyses": len(ok), "echecs": int(len(sub) - len(ok)),
                 "cause_non_precisee_pct": round(100 * float((ok["cause_racine"] == CAUSE_INCONNUE).mean()), 1),
+                "type_de_cause_pct": percent(ok["cause_type"]),
                 "facteurs_par_site_pct": {site: percent(g["facteur_principal"], top=5) for site, g in ok.groupby("site")},
                 "exemples": examples[["cause_racine", "consequence"]].to_dict(orient="records")}
 
@@ -323,9 +306,11 @@ class AnalysisWorkspace:
             "dbcv": round(float(main.relative_validity_), 3), "stabilite": round(stability, 3),
             "conforme_aux_seuils": not quality_problems(stability, unclassified, n_topics),
             "seuils_non_respectes": quality_problems(stability, unclassified, n_topics),
+            "qualite": None,
             "essais_restants": MAX_CLUSTERING_RUNS - done - 1,
             "clusters": [{"cluster": int(t), "incidents": int(n), "mots_cles": keywords[t][:5]} for t, n in sizes.items()],
         }
+        summary["qualite"] = F.clustering_quality(summary)
         self.runs[run_id] = {"key": k, "asset_type": asset_type, "dimension": dimension, "positions": positions,
                              "labels": labels, "keywords": keywords, "summary": summary}
         return summary
@@ -344,6 +329,11 @@ class AnalysisWorkspace:
                             + (f"Essais conformes disponibles : {conform}." if conform else
                                f"Aucun essai conforme : relancer run_clustering avec une autre valeur de "
                                f"min_cluster_size ({left} essais restants)."))
+        better = [i for i, r in self.runs.items() if r["key"] == k and r["summary"]["conforme_aux_seuils"]
+                  and r["summary"]["dbcv"] >= MIN_CHOSEN_DBCV]
+        if summary["dbcv"] < MIN_CHOSEN_DBCV and better:
+            raise ToolError(f"{run_id} a une séparation faible (DBCV {summary['dbcv']} < {MIN_CHOSEN_DBCV}) alors que ces "
+                            f"essais conformes font mieux : {better}. Choisis l'un d'eux (le plus détaillé si possible).")
         removed = [tid for tid, th in self.themes.items() if th["asset_type"] == asset_type and th["dimension"] == dimension]
         for tid in removed:  # des thèmes faits sur un autre clustering n'ont plus de sens
             del self.themes[tid]
@@ -377,6 +367,10 @@ class AnalysisWorkspace:
                 "facteurs_pct": percent(sub["facteur_principal"], top=4),
                 "cout_moyen_eur": round(float(sub["estimated_cost_eur"].mean())),
             }
+            if dimension == "cause":
+                detail["type_de_cause_pct"] = percent(sub["cause_type"])
+            else:
+                detail["categories_consequence_pct"] = percent(sub["categorie_consequence"], top=3)
             details.append(detail)
         return {"clusters": details, "restants_sans_theme": self.unthemed(asset_type, dimension)}
 
@@ -393,16 +387,22 @@ class AnalysisWorkspace:
                 if not isinstance(theme, dict):
                     raise ToolError("chaque thème doit être un objet {name, topics, description, justification}")
                 name = check_text(theme.get("name"), "name", MAX_THEME_NAME_CHARS)
-                description = check_text(theme.get("description"), "description", 600)
-                justification = check_text(theme.get("justification"), "justification", 1500)
+                if dimension == "cause" and re.search(CONSEQUENCE_WORDS, name, re.IGNORECASE):
+                    raise ToolError(f"nom refusé : « {name} » décrit une conséquence (arrêt, perte, dégât...). Un thème "
+                                    "de cause ne nomme que la cause (ex. « Vent fort / tempête »).")
+                description = str(theme.get("description") or "").strip()[:600]
+                justification = str(theme.get("justification") or "").strip()[:1500]
                 topics = list(dict.fromkeys(check_list(theme.get("topics"), 40, "topics")))
                 unknown = [t for t in topics if t not in known]
                 if unknown:
                     raise ToolError(f"clusters inconnus : {unknown} (existants : {known})")
-                taken = {t: self.theme_of(asset_type, dimension, t) for t in topics
-                         if self.theme_of(asset_type, dimension, t)}
-                if taken:
-                    raise ToolError(f"clusters déjà dans un thème : {taken} (remove_theme pour les libérer)")
+                # Clusters déjà rangés : ignorés (pas d'erreur), pour qu'un agent qui redéclare ses thèmes
+                # ne tourne pas en rond.
+                already = [t for t in topics if self.theme_of(asset_type, dimension, t)]
+                topics = [t for t in topics if t not in already]
+                if not topics:
+                    results.append({"name": name, "ok": True, "note": f"clusters {already} déjà rangés : rien à faire"})
+                    continue
                 mask = np.isin(labels, topics)
                 cohesion = self.cohesion(vectors[mask])
                 if len(topics) > 1 and dimension == "cause":  # fusion de causes : même facteur principal
@@ -415,7 +415,13 @@ class AnalysisWorkspace:
                     if len(set(dominant.values())) > 1:
                         raise ToolError(f"fusion refusée : ces clusters ont des facteurs principaux différents "
                                         f"{dominant}. Fais un thème par facteur.")
-                if len(topics) > 1:  # fusion : les phrases réunies doivent rester semblables
+                if len(topics) > 1 and dimension == "consequence":  # conséquences : même catégorie normalisée
+                    dominant = {t: self.causes.loc[positions[labels == t], "categorie_consequence"].mode().iat[0]
+                                for t in topics}
+                    if len(set(dominant.values())) > 1:
+                        raise ToolError(f"fusion refusée : ces clusters ont des catégories de conséquence différentes "
+                                        f"{dominant}. Ne réunis que des clusters de même catégorie.")
+                if len(topics) > 1 and dimension == "cause":  # causes : les phrases réunies doivent rester semblables
                     reference = np.average([self.cohesion(vectors[labels == t]) for t in topics],
                                            weights=[(labels == t).sum() for t in topics])
                     if cohesion < MERGE_MIN_COHESION_RATIO * reference:
@@ -426,11 +432,88 @@ class AnalysisWorkspace:
                 self.themes[theme_id] = {"asset_type": asset_type, "dimension": dimension, "name": name,
                                          "description": description, "topics": topics, "justification": justification,
                                          "incidents": int(mask.sum()), "cohesion": round(cohesion, 3)}
-                results.append({"name": name, "ok": True, "theme_id": theme_id, "incidents": int(mask.sum())})
+                results.append({"name": name, "ok": True, "theme_id": theme_id, "incidents": int(mask.sum()),
+                                **({"ignores_deja_ranges": already} if already else {})})
             except ToolError as e:
                 results.append({"name": theme.get("name") if isinstance(theme, dict) else None, "ok": False,
                                 "refus": str(e)})
         return {"resultats": results, "restants_sans_theme": self.unthemed(asset_type, dimension)}
+
+    def define_theme(self, asset_type: str, dimension: str, name: str, topics: list[int], description: str = "") -> dict:
+        """Un seul thème par appel (schéma simple, plus fiable avec un petit modèle)."""
+        result = self.define_themes(asset_type, dimension, [{"name": name, "topics": topics, "description": description}])
+        outcome = result["resultats"][0]
+        if not outcome["ok"]:
+            raise ToolError(outcome["refus"] + f" (clusters encore sans thème : {result['restants_sans_theme']})")
+        return {**outcome, "restants_sans_theme": result["restants_sans_theme"]}
+
+    def dominant(self, asset_type: str, dimension: str, mask: np.ndarray) -> str:
+        """Facteur dominant (causes, hors « indéterminé ») ou catégorie dominante (conséquences)."""
+        positions, _ = self.phrase_vectors(asset_type, dimension)
+        column = "facteur_principal" if dimension == "cause" else "categorie_consequence"
+        values = self.causes.loc[positions[mask], column].dropna()
+        values = values[values != "indéterminé"]
+        return values.mode().iat[0] if len(values) else ""
+
+    def centroid(self, asset_type: str, dimension: str, mask: np.ndarray) -> np.ndarray:
+        _, vectors = self.phrase_vectors(asset_type, dimension)
+        center = vectors[mask].mean(axis=0)
+        return center / max(np.linalg.norm(center), 1e-12)
+
+    def similar_cluster_pairs(self, asset_type: str, dimension: str) -> list[tuple[int, int, float]]:
+        """Paires de clusters à fusionner : centres très proches ET même facteur / catégorie dominant."""
+        labels = self.chosen(asset_type, dimension)["labels"]
+        topics = self.topic_ids(asset_type, dimension)
+        info = {t: (self.centroid(asset_type, dimension, labels == t), self.dominant(asset_type, dimension, labels == t))
+                for t in topics}
+        pairs = [(a, b, round(float(info[a][0] @ info[b][0]), 3)) for i, a in enumerate(topics) for b in topics[i + 1:]
+                 if info[a][1] and info[a][1] == info[b][1]]
+        return [p for p in pairs if p[2] >= MERGE_SIMILARITY]
+
+    def duplicate_themes(self, asset_type: str, dimension: str) -> list[tuple[str, str, float]]:
+        """Thèmes qui décrivent la même chose (même règle que les clusters) : à fusionner."""
+        labels = self.chosen(asset_type, dimension)["labels"]
+        themes = {tid: th for tid, th in self.themes.items() if th["asset_type"] == asset_type and th["dimension"] == dimension}
+        info = {tid: (self.centroid(asset_type, dimension, np.isin(labels, th["topics"])),
+                      self.dominant(asset_type, dimension, np.isin(labels, th["topics"]))) for tid, th in themes.items()}
+        ids = sorted(themes)
+        return [(a, b, round(float(info[a][0] @ info[b][0]), 3)) for i, a in enumerate(ids) for b in ids[i + 1:]
+                if info[a][1] and info[a][1] == info[b][1] and float(info[a][0] @ info[b][0]) >= MERGE_SIMILARITY]
+
+    def compare_clusters(self, asset_type: str, dimension: str, a: int, b: int) -> dict:
+        """Les clusters a et b décrivent-ils la même chose ? Similarité des centres + facteur dominant."""
+        self.check_args(asset_type, dimension)
+        known = self.topic_ids(asset_type, dimension)
+        check_choice(a, known, "a")
+        check_choice(b, known, "b")
+        labels = self.chosen(asset_type, dimension)["labels"]
+        column = DIMENSIONS[dimension]
+        positions, _ = self.phrase_vectors(asset_type, dimension)
+        sim = float(self.centroid(asset_type, dimension, labels == a) @ self.centroid(asset_type, dimension, labels == b))
+        da, db = self.dominant(asset_type, dimension, labels == a), self.dominant(asset_type, dimension, labels == b)
+        advice = ("fusion recommandée" if da == db and sim >= MERGE_SIMILARITY else
+                  "fusion déconseillée : facteurs différents" if da != db else "fusion possible si les phrases le confirment")
+        return {"similarite": round(sim, 3), "seuil": MERGE_SIMILARITY, "dominant": {a: da, b: db}, "avis": advice,
+                "exemples": {t: self.causes.loc[positions[labels == t], column].head(3).tolist() for t in (a, b)}}
+
+    def merge_themes(self, asset_type: str, dimension: str, theme_ids: list[str], name: str) -> dict:
+        """Fusionne des thèmes déjà créés en un seul (pour supprimer un doublon)."""
+        self.check_args(asset_type, dimension)
+        theme_ids = check_list(theme_ids, 10, "theme_ids")
+        own = [tid for tid, th in self.themes.items() if th["asset_type"] == asset_type and th["dimension"] == dimension]
+        for tid in theme_ids:
+            check_choice(tid, own, "theme_id")
+        if len(set(theme_ids)) < 2:
+            raise ToolError("il faut au moins 2 thèmes à fusionner")
+        topics = [t for tid in theme_ids for t in self.themes[tid]["topics"]]
+        backup = {tid: self.themes.pop(tid) for tid in theme_ids}
+        result = self.define_themes(asset_type, dimension, [{"name": name, "topics": topics,
+                                                             "description": backup[theme_ids[0]]["description"]}])
+        outcome = result["resultats"][0]
+        if not outcome["ok"]:
+            self.themes.update(backup)  # fusion refusée : on remet les thèmes d'origine
+            raise ToolError(outcome["refus"])
+        return {**outcome, "doublons_restants": self.duplicate_themes(asset_type, dimension)}
 
     def remove_theme(self, theme_id: str) -> dict:
         check_choice(theme_id, list(self.themes), "theme_id")
@@ -438,96 +521,51 @@ class AnalysisWorkspace:
         return {"clusters_liberes": theme["topics"],
                 "restants_sans_theme": self.unthemed(theme["asset_type"], theme["dimension"])}
 
-    def links_table(self, asset_type: str) -> pd.DataFrame:
-        table = self.incidents_table()
-        table = table[table["asset_type"] == asset_type].copy()
-        for d in DIMENSIONS:
-            table[f"theme_{d}"] = table[f"theme_{d}"].fillna("non classé")
-        return table
-
-    def liens_cause_consequence(self, asset_type: str) -> dict:
-        self.check_args(asset_type)
-        self.require_themes(asset_type)
-        t = self.links_table(asset_type)
-        pairs = (t.groupby(["theme_cause", "theme_consequence"])
-                 .agg(incidents=("incident_id", "count"), cout_moyen_eur=("estimated_cost_eur", "mean"),
-                      cout_total_eur=("estimated_cost_eur", "sum"))
-                 .sort_values("incidents", ascending=False).head(TOP_PAIRS).reset_index())
-        pairs["part_pct"] = (100 * pairs["incidents"] / len(t)).round(1)
-        pairs["sites_pct"] = [percent(t[(t["theme_cause"] == r.theme_cause) & (t["theme_consequence"] == r.theme_consequence)]
-                                      ["site"], top=3) for r in pairs.itertuples()]
-        pairs[["cout_moyen_eur", "cout_total_eur"]] = pairs[["cout_moyen_eur", "cout_total_eur"]].round(0)
-        return {
-            "paires_principales": pairs.to_dict(orient="records"),
-            "consequences_de_chaque_cause_pct": {c: percent(g["theme_consequence"], top=3)
-                                                 for c, g in t.groupby("theme_cause")},
-            "causes_de_chaque_consequence_pct": {c: percent(g["theme_cause"], top=3)
-                                                 for c, g in t.groupby("theme_consequence")},
-        }
-
     def site_evidence(self, asset_type: str) -> dict:
+        """Ce qui distingue chaque site des autres sites du même type (calculé en Python, facts.py)."""
         self.check_args(asset_type)
+        for d in DIMENSIONS:
+            self.chosen(asset_type, d)
         self.require_themes(asset_type)
-        t = self.links_table(asset_type)
-        t = t[t["erreur_analyse"] == ""]
+        table = self.incidents_table()
+        table = table[table["asset_type"] == asset_type]
+        indicators = F.profile_indicators(table)
         sites = {}
-        for site, g in t.groupby("site"):
-            pairs = (g.groupby(["theme_cause", "theme_consequence"]).size().sort_values(ascending=False).head(3))
+        for site, g in table.groupby("site"):
             sites[site] = {
-                "incidents": len(g),
-                "causes_pct": percent(g["theme_cause"], top=6),
-                "consequences_pct": percent(g["theme_consequence"], top=4),
-                "facteurs_pct": percent(g["facteur_principal"], top=5),
-                "paires_principales": [f"{c} -> {q} ({n})" for (c, q), n in pairs.items()],
-                "lie_vieillissement_pct": round(100 * float(g["lie_vieillissement"].astype(bool).mean()), 1),
-                "lie_maintenance_pct": round(100 * float(g["lie_maintenance"].astype(bool).mean()), 1),
-                "severe_pct": round(100 * float((g["severity"] == "sévère").mean()), 1),
-                "cout_moyen_eur": round(float(g["estimated_cost_eur"].mean())),
-                "arret_moyen_h": round(float(g["downtime_hours"].mean()), 1),
-                "meteo_pct": percent(g["weather_condition"], top=3),
-                "actions_correctives_frequentes": g["action_corrective"].value_counts().head(4).index.tolist(),
+                "points_distinctifs": [F.point_text(p) for p in F.distinctive_points(indicators, site)]
+                or ["aucun critère ne distingue nettement ce site"],
+                "causes_connues_les_plus_frequentes": [f"{c['cause']} ({c['part_incidents_pct']} % des incidents)"
+                                                      for c in F.dominant_causes(g)],
+                "cause_non_precisee_pct": F.unknown_share(g),
             }
         return {"asset_type": asset_type, "profils_possibles": SITE_PROFILES[asset_type],
-                "indicateurs_profils": profile_indicators_text(profile_indicators(t)), "sites": sites}
+                "criteres_par_site": F.rank_text(indicators), "sites": sites,
+                "compatibilite_profils": F.profile_compatibility(indicators, asset_type),
+                "meilleures_attributions": F.best_assignments(indicators, asset_type)}
 
-    def write_report(self, synthese: str, causes_racines: str, chaines_cause_consequence: str,
-                     sites: list[dict], limites: str) -> dict:
-        """Outil final. Le contenu est vérifié ici ; la mise en forme et les tableaux chiffrés sont
-        ajoutés par le code (report.py)."""
-        for asset_type in ASSET_TYPES:
-            self.require_causes(asset_type)
-            for d in DIMENSIONS:
-                self.chosen(asset_type, d)
-            self.require_themes(asset_type)
-        text = {"synthese": check_text(synthese, "synthese", 4000),
-                "causes_racines": check_text(causes_racines, "causes_racines", 6000),
-                "chaines_cause_consequence": check_text(chaines_cause_consequence, "chaines_cause_consequence", 6000),
-                "limites": check_text(limites, "limites", 3000)}
-
+    def assign_profiles(self, assignments: list[dict], raisonnement: str) -> dict:
+        """Outil final de la phase profils : un profil A, B, C par site, chacun une fois par type."""
+        raisonnement = check_text(raisonnement, "raisonnement", 4000)
         expected = {s: a for a in ASSET_TYPES for s in self.sites[a]}
-        if not isinstance(sites, list) or not all(isinstance(s, dict) for s in sites) \
-                or sorted(s.get("site", "") for s in sites) != sorted(expected):
+        if not isinstance(assignments, list) or not all(isinstance(x, dict) for x in assignments) \
+                or sorted(x.get("site", "") for x in assignments) != sorted(expected):
             raise ToolError(f"il faut exactement une entrée par site : {sorted(expected)}")
+        table = self.incidents_table()
         for asset_type in ASSET_TYPES:
-            profiles = sorted(str(s.get("profil")) for s in sites if expected[s["site"]] == asset_type)
+            profiles = sorted(str(x.get("profil")) for x in assignments if expected[x["site"]] == asset_type)
             if profiles != sorted(SITE_PROFILES[asset_type]):
                 raise ToolError(f"{asset_type} : chaque profil A, B, C doit être attribué à exactement un site "
                                 f"(reçu : {profiles})")
-        for s in sites:
-            for field in ("justification_profil", "causes_dominantes"):
-                s[field] = check_text(s.get(field), f"{s['site']}.{field}")
-            actions = s.get("plan_remediation")
-            if not isinstance(actions, list) or not ACTIONS_PER_SITE[0] <= len(actions) <= ACTIONS_PER_SITE[1]:
-                raise ToolError(f"{s['site']} : plan_remediation doit contenir entre {ACTIONS_PER_SITE[0]} et "
-                                f"{ACTIONS_PER_SITE[1]} actions")
-            for a in actions:
-                if not isinstance(a, dict):
-                    raise ToolError(f"{s['site']} : chaque action doit être un objet {{action, priorite, justification}}")
-                check_choice(a.get("priorite"), ["haute", "moyenne", "basse"], f"{s['site']}.priorite")
-                a["action"] = check_text(a.get("action"), f"{s['site']}.action", 400)
-                a["justification"] = check_text(a.get("justification"), f"{s['site']}.justification", 600)
-        self.report = {**text, "sites": sorted(sites, key=lambda s: (expected[s["site"]], s["site"]))}
-        return {"message": "rapport enregistré"}
+            indicators = F.profile_indicators(table[table["asset_type"] == asset_type])
+            chosen = {x["site"]: x["profil"] for x in assignments if expected[x["site"]] == asset_type}
+            best = F.best_assignments(indicators, asset_type)
+            score, top = F.assignment_score(indicators, asset_type, chosen), F.assignment_score(indicators, asset_type, best[0])
+            if score < top:
+                raise ToolError(f"{asset_type} : cette attribution respecte {score} attentes des profils, alors que "
+                                f"{best} en respectent {top}. Choisis l'une de ces meilleures attributions.")
+        self.profiles = {x["site"]: {"profil": x["profil"], "raisonnement": raisonnement} for x in assignments}
+        return {"message": "profils enregistrés"}
 
 
 ASSET = {"type": "string", "enum": ASSET_TYPES}
@@ -564,34 +602,30 @@ TOOLS = [
          {"asset_type": ASSET, "dimension": DIMENSION,
           "themes": {"type": "array", "maxItems": MAX_THEMES_PER_CALL, "items": {
               "type": "object", "additionalProperties": False,
-              "required": ["name", "topics", "description", "justification"],
+              "required": ["name", "topics"],
               "properties": {"name": {"type": "string", "description": f"{MAX_THEME_NAME_CHARS} caractères maximum"},
                              "topics": {"type": "array", "items": {"type": "integer"}},
                              "description": {"type": "string", "description": "1 à 2 phrases"},
                              "justification": {"type": "string"}}}}}),
+    tool("define_theme", "Crée UN thème nommé à partir d'un ou plusieurs clusters (plusieurs = fusion). Appelle-le une "
+                         "fois par thème ; plusieurs appels par tour sont possibles.",
+         {"asset_type": ASSET, "dimension": DIMENSION,
+          "name": {"type": "string", "description": f"{MAX_THEME_NAME_CHARS} caractères maximum"},
+          "topics": {"type": "array", "items": {"type": "integer"}},
+          "description": {"type": "string", "description": "facultatif, 1 phrase"}}, required=["asset_type", "dimension", "name", "topics"]),
+    tool("compare_clusters", "Les clusters a et b décrivent-ils la même chose ? Renvoie la similarité de leurs centres, "
+                             "leur facteur (ou catégorie) dominant, des exemples et un avis de fusion.",
+         {"asset_type": ASSET, "dimension": DIMENSION, "a": {"type": "integer"}, "b": {"type": "integer"}}),
+    tool("merge_themes", "Fusionne plusieurs thèmes déjà créés en un seul (pour supprimer un doublon).",
+         {"asset_type": ASSET, "dimension": DIMENSION, "theme_ids": {"type": "array", "items": {"type": "string"}},
+          "name": {"type": "string"}}),
     tool("remove_theme", "Supprime un thème pour libérer ses clusters.", {"theme_id": {"type": "string"}}),
-    tool("liens_cause_consequence", "Croise les thèmes de causes et de conséquences : paires les plus fréquentes "
-                                    "(coût, sites), conséquences de chaque cause, causes de chaque conséquence.",
-         {"asset_type": ASSET}),
-    tool("site_evidence", "Statistiques par site (thèmes de causes et de conséquences, facteurs, paires, usure, "
-                          "maintenance, sévérité, coût, météo, actions fréquentes) et profils possibles.",
-         {"asset_type": ASSET}),
-    tool("write_report", "Outil final : rédige le rapport d'analyse. Les tableaux chiffrés sont ajoutés automatiquement.",
-         {"synthese": {"type": "string", "description": "résumé pour un responsable : 5 à 10 phrases"},
-          "causes_racines": {"type": "string", "description": "causes racines principales, par type d'installation"},
-          "chaines_cause_consequence": {"type": "string", "description": "quelles causes mènent à quelles "
-                                                                         "conséquences, lesquelles coûtent le plus"},
-          "sites": {"type": "array", "items": {
-              "type": "object", "additionalProperties": False,
-              "required": ["site", "profil", "justification_profil", "causes_dominantes", "plan_remediation"],
-              "properties": {
-                  "site": {"type": "string"}, "profil": {"type": "string", "enum": ["A", "B", "C"]},
-                  "justification_profil": {"type": "string", "description": "faits observés qui correspondent au profil"},
-                  "causes_dominantes": {"type": "string"},
-                  "plan_remediation": {"type": "array", "items": {
-                      "type": "object", "additionalProperties": False, "required": ["action", "priorite", "justification"],
-                      "properties": {"action": {"type": "string"},
-                                     "priorite": {"type": "string", "enum": ["haute", "moyenne", "basse"]},
-                                     "justification": {"type": "string"}}}}}}},
-          "limites": {"type": "string", "description": "limites de l'analyse et points à confirmer"}}),
+    tool("site_evidence", "Pour chaque site : points distinctifs (critères où il se distingue nettement des autres "
+                          "sites), causes connues les plus fréquentes, part de causes non précisées ; et les critères "
+                          "des profils mesurés sur chaque site.", {"asset_type": ASSET}),
+    tool("assign_profiles", "Outil final : associe chaque site à un profil A, B ou C (chaque profil une fois par type).",
+         {"assignments": {"type": "array", "items": {
+             "type": "object", "additionalProperties": False, "required": ["site", "profil"],
+             "properties": {"site": {"type": "string"}, "profil": {"type": "string", "enum": ["A", "B", "C"]}}}},
+          "raisonnement": {"type": "string", "description": "pourquoi chaque site correspond à son profil"}}),
 ]
