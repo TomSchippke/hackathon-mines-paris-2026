@@ -20,6 +20,9 @@ st.set_page_config(
 # Chemins des données
 SUMMARY_PATH = Path("outputs/segmentation/clusters_summary.csv")
 INCIDENTS_PATH = Path("outputs/segmentation/incidents_segmented.csv")
+EQUIPMENT_SUMMARY_PATH = Path("outputs/equipment/equipment_summary.csv")
+EQUIPMENT_TIMELINE_PATH = Path("outputs/equipment/incidents_with_timeline.csv")
+TECHNICIAN_PERF_PATH = Path("outputs/equipment/technician_performance.csv")
 
 # Palette de couleurs par criticité
 TIER_COLORS = {
@@ -56,6 +59,20 @@ def load_data() -> tuple[pd.DataFrame, pd.DataFrame]:
             incidents_df[col] = pd.to_numeric(incidents_df[col], errors="coerce").fillna(0.0)
 
     return summary_df, incidents_df
+
+
+@st.cache_data
+def load_equipment_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Charge les données chronologiques d'équipements ou les calcule automatiquement à la volée."""
+    if not (EQUIPMENT_SUMMARY_PATH.exists() and EQUIPMENT_TIMELINE_PATH.exists() and TECHNICIAN_PERF_PATH.exists()):
+        from equipment_analysis.pipeline import run_equipment_analysis
+        res = run_equipment_analysis()
+        return res["equipment_df"], res["timeline_df"], res["technician_df"]
+
+    eq_df = pd.read_csv(EQUIPMENT_SUMMARY_PATH)
+    tl_df = pd.read_csv(EQUIPMENT_TIMELINE_PATH)
+    tech_df = pd.read_csv(TECHNICIAN_PERF_PATH)
+    return eq_df, tl_df, tech_df
 
 
 def format_currency(val: float) -> str:
@@ -99,10 +116,11 @@ def main() -> None:
     )
 
     # Onglets principaux
-    tab1, tab2, tab3 = st.tabs([
+    tab1, tab2, tab3, tab4 = st.tabs([
         "📊 Synthèse Exécutive & Pareto",
         "🔍 Diagnostic Détaillé par Cluster",
         "📋 Explorateur d'Incidents",
+        "🔬 Chronologie & Efficacité Équipements",
     ])
 
     # =========================================================================
@@ -453,6 +471,289 @@ def main() -> None:
             height=400,
         )
 
+    # =========================================================================
+    # ONGLET 4 : CHRONOLOGIE ÉQUIPEMENTS & EFFICACITÉ TECHNICIENS
+    # =========================================================================
+    with tab4:
+        st.subheader("🔬 Chronologie des Pannes & Évaluation des Interventions")
+        st.markdown(
+            "Recentrage de l'analyse sur le cycle de vie des **actifs (`equipment_id`)** et "
+            "l'efficacité opérationnelle des **techniciens**. "
+            "Reconstitution des frises chronologiques, détection des récidives précoces et palmarès des *bad actors*."
+        )
+
+        eq_df, tl_df, tech_df = load_equipment_data()
+
+        # Barre de filtres et seuil de récidive
+        fc1, fc2, fc3 = st.columns([1, 1, 2])
+        with fc1:
+            eq_site_filter = st.selectbox(
+                "Filtrer par site :",
+                options=["Tous"] + sorted(eq_df["site"].dropna().unique().tolist()),
+            )
+        with fc2:
+            eq_asset_filter = st.selectbox(
+                "Filtrer par type d'actif :",
+                options=["Tous"] + sorted(eq_df["asset_type"].dropna().unique().tolist()),
+            )
+        with fc3:
+            rec_threshold = st.slider(
+                "⏱️ Seuil temporel de récidive (jours après intervention) :",
+                min_value=3,
+                max_value=60,
+                value=30,
+                step=1,
+                help="Un incident survenant moins de N jours après le précédent sur la même machine est classé comme récidive post-intervention.",
+            )
+
+        # Filtrage des DataFrames
+        filtered_eq = eq_df.copy()
+        if eq_site_filter != "Tous":
+            filtered_eq = filtered_eq[filtered_eq["site"] == eq_site_filter]
+        if eq_asset_filter != "Tous":
+            filtered_eq = filtered_eq[filtered_eq["asset_type"] == eq_asset_filter]
+
+        # Calcul dynamique du flag de récidive selon le curseur
+        tl_work = tl_df.copy()
+        tl_work["datetime"] = pd.to_datetime(tl_work["date"])
+        tl_work["is_custom_rec"] = (
+            tl_work["days_since_last_incident"].notna()
+            & (tl_work["days_since_last_incident"] <= rec_threshold)
+        )
+        tl_work["followed_by_custom_rec"] = (
+            tl_work["days_until_next_incident"].notna()
+            & (tl_work["days_until_next_incident"] <= rec_threshold)
+        )
+
+        # KPIs globaux flotte
+        st.divider()
+        g1, g2, g3, g4 = st.columns(4)
+        eq_ids_filtered = set(filtered_eq["equipment_id"])
+        fleet_tl = tl_work[tl_work["equipment_id"].isin(eq_ids_filtered)]
+        fleet_total_inc = len(fleet_tl)
+        fleet_rec_cnt = int(fleet_tl["is_custom_rec"].sum())
+        fleet_rec_rate = (fleet_rec_cnt / max(1, fleet_total_inc)) * 100
+        fleet_mtbf = filtered_eq["mtbf_days"].mean() if not filtered_eq.empty else 0
+
+        g1.metric("Équipements filtrés", f"{len(filtered_eq)} machines")
+        g2.metric("MTBF Moyen Flotte", f"{fleet_mtbf:.1f} jours")
+        g3.metric(f"Récidives (< {rec_threshold}j)", f"{fleet_rec_cnt} incidents")
+        g4.metric(f"Taux de récidive global", f"{fleet_rec_rate:.1f} %")
+
+        # Section 1 : Chronologie détaillée par équipement
+        st.subheader("📅 Chronique de vie & Timeline par Équipement")
+
+        selected_eq = st.selectbox(
+            "Sélectionner un équipement pour visualiser sa timeline :",
+            options=filtered_eq["equipment_id"].tolist(),
+            format_func=lambda x: f"{x} ({filtered_eq.loc[filtered_eq['equipment_id'] == x, 'site'].values[0]} - {filtered_eq.loc[filtered_eq['equipment_id'] == x, 'total_incidents'].values[0]} pannes)",
+        )
+
+        if selected_eq:
+            eq_info = filtered_eq[filtered_eq["equipment_id"] == selected_eq].iloc[0]
+            eq_timeline = tl_work[tl_work["equipment_id"] == selected_eq].sort_values("datetime").copy()
+
+            # Cartes métriques pour cet équipement
+            c1, c2, c3, c4, c5 = st.columns(5)
+            eq_rec_count = int(eq_timeline["is_custom_rec"].sum())
+            eq_rec_rate = (eq_rec_count / max(1, len(eq_timeline) - 1)) * 100
+            c1.metric("Total Pannes", f"{eq_info['total_incidents']}")
+            c2.metric("MTBF (délai moyen)", f"{eq_info['mtbf_days']:.1f} j")
+            c3.metric(f"Récidives (< {rec_threshold}j)", f"{eq_rec_count} ({eq_rec_rate:.0f} %)")
+            c4.metric("Coût Cumulé", format_currency(eq_info["total_cost_eur"]))
+            c5.metric("Technicien Fréquent", f"{eq_info['most_frequent_technician']}")
+
+            # Graphique interactif de la frise chronologique
+            eq_timeline["statut_panne"] = eq_timeline["is_custom_rec"].map(
+                {True: f"⚠️ Récidive (< {rec_threshold}j)", False: "Panne isolée / 1ère panne"}
+            )
+            eq_timeline["date_str"] = eq_timeline["datetime"].dt.strftime("%Y-%m-%d")
+
+            hover_cols = {
+                "datetime": False,
+                "date_str": True,
+                "incident_order": True,
+                "severity": True,
+                "technician_id": True,
+                "prev_technician_id": True,
+                "days_since_last_incident": ":.1f",
+                "downtime_hours": ":.1f",
+                "estimated_cost_eur": ":.0f",
+            }
+            if "problem_title" in eq_timeline.columns:
+                hover_cols["problem_title"] = True
+
+            fig_timeline = px.scatter(
+                eq_timeline,
+                x="datetime",
+                y="days_since_last_incident",
+                color="statut_panne",
+                size="downtime_hours",
+                color_discrete_map={
+                    f"⚠️ Récidive (< {rec_threshold}j)": "#EF4444",
+                    "Panne isolée / 1ère panne": "#3B82F6",
+                },
+                hover_data=hover_cols,
+                labels={
+                    "datetime": "Date de l'incident",
+                    "days_since_last_incident": "Jours depuis la panne précédente",
+                    "statut_panne": "Statut de récidive",
+                    "downtime_hours": "Arrêt (h)",
+                    "date_str": "Date",
+                    "technician_id": "Technicien",
+                    "prev_technician_id": "Tech précédent",
+                },
+                title=f"Frise Chronologique des Pannes : {selected_eq} (Taille de bulle = Durée d'arrêt)",
+            )
+            fig_timeline.add_hline(
+                y=rec_threshold,
+                line_dash="dash",
+                line_color="#EF4444",
+                annotation_text=f"Seuil de récidive ({rec_threshold}j)",
+                annotation_position="bottom right",
+            )
+            fig_timeline.update_layout(height=420)
+            st.plotly_chart(fig_timeline, use_container_width=True)
+
+            # Historique tabulaire
+            with st.expander(f"📋 Détail de l'historique des {len(eq_timeline)} pannes de {selected_eq}"):
+                display_cols = [
+                    "incident_order",
+                    "date",
+                    "severity",
+                    "days_since_last_incident",
+                    "is_custom_rec",
+                    "technician_id",
+                    "prev_technician_id",
+                    "downtime_hours",
+                    "estimated_cost_eur",
+                    "problem_title",
+                ]
+                avail_cols = [c for c in display_cols if c in eq_timeline.columns]
+                st.dataframe(
+                    eq_timeline[avail_cols].style.format({
+                        "days_since_last_incident": lambda x: f"{x:.1f} j" if pd.notna(x) else "-",
+                        "downtime_hours": lambda x: f"{x:.1f} h",
+                        "estimated_cost_eur": lambda x: f"{x:,.0f} €",
+                    }),
+                    use_container_width=True,
+                    height=250,
+                )
+
+        st.divider()
+
+        # Section 2 : Palmarès des Bad Actors
+        st.subheader("⚠️ Palmarès des « Bad Actors » (Équipements les plus fragiles)")
+        st.markdown(
+            "Les équipements combinant **faible MTBF**, **taux élevé de récidive** et **coûts cumulés élevés** "
+            "doivent faire l'objet d'une révision majeure ou d'un remplacement préventif."
+        )
+
+        col_ba1, col_ba2 = st.columns([3, 2])
+        with col_ba1:
+            fig_scatter = px.scatter(
+                filtered_eq,
+                x="mtbf_days",
+                y="total_cost_eur",
+                size="total_incidents",
+                color="bad_actor_score",
+                color_continuous_scale="Reds",
+                hover_name="equipment_id",
+                hover_data=["site", "total_incidents", "recurrence_rate_30d", "bad_actor_score"],
+                labels={
+                    "mtbf_days": "MTBF moyen (Jours de bon fonctionnement)",
+                    "total_cost_eur": "Coût cumulé total (€)",
+                    "bad_actor_score": "Score Bad Actor (0-100)",
+                    "total_incidents": "Nombre d'incidents",
+                },
+                title="Vulnérabilité : MTBF vs Coût Cumulé (Coloré par Score de Criticité)",
+            )
+            fig_scatter.update_layout(height=400)
+            st.plotly_chart(fig_scatter, use_container_width=True)
+
+        with col_ba2:
+            st.markdown("**Top 10 Actifs Critiques à Auditer :**")
+            top_bad = filtered_eq.head(10)[[
+                "equipment_id",
+                "site",
+                "total_incidents",
+                "mtbf_days",
+                "recurrence_rate_30d",
+                "total_cost_eur",
+                "bad_actor_score",
+            ]]
+            st.dataframe(
+                top_bad.style.format({
+                    "mtbf_days": "{:.1f} j",
+                    "recurrence_rate_30d": "{:.1f} %",
+                    "total_cost_eur": lambda x: f"{x:,.0f} €",
+                    "bad_actor_score": "{:.1f}",
+                }),
+                use_container_width=True,
+                height=350,
+            )
+
+        st.divider()
+
+        # Section 3 : Audit & Efficacité des Techniciens
+        st.subheader("👷 Audit d'Efficacité des Interventions par Technicien")
+        st.markdown(
+            "Mesure la pérennité des réparations : quel est le **taux de récidive** post-intervention "
+            "et le **temps moyen de survie de la machine** avant sa prochaine panne ?"
+        )
+
+        # Calcul dynamique des métriques techniciens avec le seuil personnalisé
+        custom_tech_stats = []
+        for tech_id, t_group in tl_work.groupby("technician_id"):
+            tot = len(t_group)
+            opps = t_group["days_until_next_incident"].dropna()
+            recs = t_group["followed_by_custom_rec"].sum()
+            surv = opps.mean() if len(opps) > 0 else float("nan")
+            rate = (recs / len(opps) * 100) if len(opps) > 0 else 0.0
+            custom_tech_stats.append({
+                "technician_id": tech_id,
+                "total_interventions": tot,
+                f"recidives_{rec_threshold}j": int(recs),
+                f"taux_recidive_{rec_threshold}j": round(rate, 1),
+                "delai_survie_moyen_jours": round(surv, 1) if pd.notna(surv) else "-",
+                "duree_arret_moyenne": round(t_group["downtime_hours"].mean(), 1),
+                "cout_moyen": round(t_group["estimated_cost_eur"].mean(), 0),
+            })
+        custom_tech_df = pd.DataFrame(custom_tech_stats).sort_values(
+            by=f"taux_recidive_{rec_threshold}j", ascending=False
+        )
+
+        t_col1, t_col2 = st.columns([3, 2])
+        with t_col1:
+            fig_tech = px.bar(
+                custom_tech_df,
+                x=f"taux_recidive_{rec_threshold}j",
+                y="technician_id",
+                orientation="h",
+                color=f"taux_recidive_{rec_threshold}j",
+                color_continuous_scale="RdYlGn_r",
+                labels={
+                    f"taux_recidive_{rec_threshold}j": f"Taux de panne sous {rec_threshold}j (%)",
+                    "technician_id": "Technicien",
+                },
+                title=f"Taux de Récidive Post-Intervention sous {rec_threshold} jours par Technicien",
+            )
+            fig_tech.update_layout(yaxis={"categoryorder": "total ascending"}, height=420)
+            st.plotly_chart(fig_tech, use_container_width=True)
+
+        with t_col2:
+            st.markdown(f"**Classement Qualité & Rappels (< {rec_threshold}j) :**")
+            st.dataframe(
+                custom_tech_df.style.format({
+                    f"taux_recidive_{rec_threshold}j": "{:.1f} %",
+                    "duree_arret_moyenne": "{:.1f} h",
+                    "cout_moyen": lambda x: f"{x:,.0f} €",
+                }),
+                use_container_width=True,
+                height=380,
+            )
+
 
 if __name__ == "__main__":
     main()
+

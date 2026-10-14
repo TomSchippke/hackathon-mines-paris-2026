@@ -24,13 +24,14 @@ from pdf_pipeline.pipeline import run as run_pdf
 from topic_modeling import config as topic_config
 from topic_modeling.pipeline import run as run_topics
 from agentic_pipeline.pipeline import run_agentic_segmentation
+from equipment_analysis.pipeline import run_equipment_analysis
 
-STEPS = ["pdf", "topics", "segmentation", "webapp"]
+STEPS = ["pdf", "topics", "segmentation", "equipment", "webapp"]
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--steps", nargs="+", choices=STEPS, default=["pdf", "topics", "segmentation"], help="étapes à lancer")
+    parser.add_argument("--steps", nargs="+", choices=STEPS, default=["pdf", "topics", "segmentation", "equipment"], help="étapes à lancer")
     parser.add_argument("--csv", type=Path, default=pdf_config.DEFAULT_CSV, help="CSV des incidents")
     parser.add_argument("--out-dir", type=Path, default=Path("outputs"))
     parser.add_argument("--min-cluster-size", type=int, default=topic_config.MIN_CLUSTER_SIZE)
@@ -55,6 +56,14 @@ def main() -> None:
                 out_dir=args.out_dir / "segmentation",
                 min_cluster_size=args.min_cluster_size,
                 split_col="asset_type",
+            )
+        elif step == "equipment":
+            incidents_file = args.out_dir / "segmentation" / "incidents_segmented.csv"
+            if not incidents_file.exists():
+                incidents_file = args.out_dir / "incidents_full.csv"
+            run_equipment_analysis(
+                input_csv=incidents_file,
+                out_dir=args.out_dir / "equipment",
             )
         elif step == "webapp":
             import subprocess

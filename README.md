@@ -43,6 +43,9 @@ python main.py --steps topics     # une seule étape
 |---|---|---|
 | 1. `pdf` : extraction des PDF (digitaux + scans) | [`pdf_pipeline/`](pdf_pipeline/README.md) | `outputs/incidents_full.csv` |
 | 2. `topics` : topic modeling BERTopic sur les 1800 incidents | [`topic_modeling/`](topic_modeling/README.md) | `outputs/topics/` |
+| 3. `segmentation` : segmentation causale & criticité LLM | [`agentic_pipeline/`](agentic_pipeline/) | `outputs/segmentation/` |
+| 4. `equipment` : chronologies pannes & audit techniciens | [`equipment_analysis/`](equipment_analysis/) | `outputs/equipment/` |
+| 5. `webapp` : tableau de bord interactif Streamlit | [`webapp/`](webapp/) | `streamlit run webapp/app.py` |
 
 Chaque étape garde un cache dans `outputs/cache/` : relancer ne refait que ce qui a changé.
 
