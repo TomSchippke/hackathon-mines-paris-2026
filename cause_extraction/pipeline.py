@@ -1,9 +1,13 @@
-"""Cause racine de chaque incident, extraite par le LLM (utilisé par l'agent d'analyse).
+"""Causes de chaque incident, extraites par le LLM (utilisé par l'agent d'analyse).
 
 Les embeddings regroupent les incidents par type d'événement (incendie, surtension...), pas par
-cause. Ici, le LLM lit chaque rapport et renvoie une analyse structurée (JSON imposé) : composant,
-cause racine, facteur principal parmi une liste fermée, rôle de l'usure et de la maintenance,
-action corrective. Les listes fermées permettent ensuite de compter et de comparer les sites.
+cause. Ici, le LLM lit chaque rapport et renvoie une analyse structurée (JSON imposé) : une cause
+racine (le phénomène qui a déclenché l'incident), des causes contributives (les conditions qui ont
+permis ou aggravé l'incident), la conséquence, le composant tel qu'écrit, l'hypothèse de maintenance
+et l'action corrective. Aucune liste fermée : les thèmes sont découverts ensuite, dans les données.
+
+Chaque cause (racine et contributives) doit citer un extrait du rapport, vérifié par le code : une
+cause dont l'extrait n'est pas dans le rapport est annulée (racine) ou écartée (contributive).
 
 L'agent d'analyse (analysis_agent) appelle analyse_incidents via son outil extract_causes ; le
 cache des réponses est partagé : ce qui a été analysé une fois ne l'est plus jamais.
@@ -13,10 +17,9 @@ influencée par ce qu'on sait (ou croit savoir) du site, sinon l'association sit
 deviendrait circulaire.
 
 Lancement manuel (hors pipeline principale), sorties dans outputs/exploration/causes/ :
-    incidents_causes.csv       chaque incident avec son analyse ;
-    facteurs_par_site.csv      % des incidents de chaque site par facteur principal ;
-    composants_par_site.csv    % des incidents de chaque site par composant ;
-    indicateurs_par_site.csv   part liée à l'usure, à la maintenance, coût et durée moyens.
+    incidents_causes.csv          chaque incident avec son analyse ;
+    contributives_par_site.csv    par site : nombre de causes contributives vérifiées, % écartées,
+                                  part de maintenance suspectée probable, coût et durée moyens.
 
 Usage :
     python -m cause_extraction
@@ -39,9 +42,9 @@ from llm.client import chat
 from paths import CAUSES_DIR, INCIDENTS_CAUSES, INCIDENTS_FULL
 
 from framing.cadrage import current
-from framing.config import SEGMENT_COLUMN, UNDETERMINED
+from framing.config import SEGMENT_COLUMN
 
-from .config import (CAUSE_INCONNUE, FIELDS, PROMPT_EXCLUDED_COLUMNS, QUOTE_MIN_MATCH, UNKNOWN_CAUSE_PATTERN, WORKERS,
+from .config import (CAUSE_INCONNUE, FIELDS, MAX_CONTRIBUTIVES, PROMPT_EXCLUDED_COLUMNS, QUOTE_MIN_MATCH, UNKNOWN_CAUSE_PATTERN, WORKERS,
                      response_format, system_prompt)
 
 
@@ -70,7 +73,7 @@ def quote_found(quote: str, text: str) -> bool:
 
 
 def normalize_cause(result: dict, text: str) -> dict:
-    """Contrôles déterministes de la cause renvoyée par le LLM :
+    """Contrôles déterministes de la cause racine renvoyée par le LLM :
     - une seule valeur pour une cause inconnue, quelle que soit sa formulation ;
     - une cause explicite ou inférée sans indice vérifiable dans le rapport est annulée (inconnue)."""
     result["indice_verifie"] = False
@@ -79,8 +82,15 @@ def normalize_cause(result: dict, text: str) -> dict:
     if not result["indice_verifie"]:
         if result["cause_type"] != "inconnue":
             result["cause_annulee"] = result["cause_racine"]  # gardée pour transparence
-        result.update(cause_racine=CAUSE_INCONNUE, cause_type="inconnue", facteur_principal=UNDETERMINED)
+        result.update(cause_racine=CAUSE_INCONNUE, cause_type="inconnue")
     return result
+
+
+def normalize_contributing(items: list[dict], text: str) -> tuple[list[dict], int]:
+    """Garde les causes contributives dont l'extrait figure dans le rapport ; renvoie aussi le nombre
+    d'items écartés (extrait absent : cause probablement inventée)."""
+    kept = [item for item in items if quote_found(item.get("indice", ""), text)]
+    return kept[:MAX_CONTRIBUTIVES], len(items) - len(kept)
 
 
 def analyse(row: dict, prompt: str, schema: dict) -> dict:
@@ -90,26 +100,42 @@ def analyse(row: dict, prompt: str, schema: dict) -> dict:
                        {"role": "user", "content": incident_prompt(row)}],
                       role="extraction", response_format=schema)
         result = json.loads(answer["content"])
-        result["facteurs_secondaires"] = " | ".join(result["facteurs_secondaires"])
-        return {**normalize_cause(result, row["text"]), "erreur_analyse": ""}
+        result = normalize_cause(result, row["text"])
+        kept, n_dropped = normalize_contributing(result["causes_contributives"], row["text"])
+        result["causes_contributives"] = json.dumps(kept, ensure_ascii=False)
+        result["contributives_rejetees"] = n_dropped
+        return {**result, "erreur_analyse": ""}
     except Exception as e:  # filtre de contenu Azure, réponse invalide... : signalé, n'arrête rien
-        return {**{f: None for f in FIELDS}, "erreur_analyse": f"{type(e).__name__}: {e}"[:300]}
+        return {**{f: None for f in FIELDS}, "contributives_rejetees": None,
+                "erreur_analyse": f"{type(e).__name__}: {e}"[:300]}
 
 
 def analyse_incidents(df: pd.DataFrame, workers: int = WORKERS) -> pd.DataFrame:
     """Analyse de chaque ligne de `df` (appels en parallèle, réponses en cache). Une ligne de
     résultat par incident, dans le même ordre et avec le même index que `df`."""
     rows = df.to_dict(orient="records")
-    prompt, schema = system_prompt(), response_format()  # listes fermées du cadrage
+    prompt, schema = system_prompt(), response_format()
     with ThreadPoolExecutor(max_workers=workers) as pool:
         results = list(tqdm(pool.map(lambda r: analyse(r, prompt, schema), rows), total=len(rows),
                             desc="Analyse des causes"))
     return pd.DataFrame(results, index=df.index)
 
 
-def percent_by_site(df: pd.DataFrame, column: str) -> pd.DataFrame:
-    table = (pd.crosstab(df[column], df["site"], normalize="columns") * 100).round(1)
-    return table.loc[table.max(axis=1).sort_values(ascending=False).index]
+def contributives_by_site(ok: pd.DataFrame) -> pd.DataFrame:
+    """Par site : causes contributives vérifiées, part écartée, maintenance suspectée, coût et durée."""
+    ok = ok.assign(verifiees=ok["causes_contributives"].map(lambda s: len(json.loads(s))),
+                   rejetees=ok["contributives_rejetees"].astype(int))
+    by_site = ok.groupby("site")
+    total = by_site["verifiees"].sum() + by_site["rejetees"].sum()
+    return pd.DataFrame({
+        "incidents": by_site.size(),
+        "contributives_moyenne": by_site["verifiees"].mean().round(2),
+        "pct_contributives_rejetees": (100 * by_site["rejetees"].sum() / total).round(1),
+        "pct_maintenance_probable": by_site["maintenance_suspectee"].apply(
+            lambda s: round(100 * (s == "probable").mean(), 1)),
+        "cout_moyen_eur": by_site["estimated_cost_eur"].mean().round(),
+        "arret_moyen_h": by_site["downtime_hours"].mean().round(1),
+    })
 
 
 def run(input_csv: Path, workers: int) -> Path:
@@ -126,29 +152,13 @@ def run(input_csv: Path, workers: int) -> Path:
     out.to_csv(INCIDENTS_CAUSES, index=False)
 
     ok = out[out["erreur_analyse"] == ""]
-    percent_by_site(ok, "facteur_principal").to_csv(CAUSES_DIR / "facteurs_par_site.csv")
-    percent_by_site(ok, "composant").to_csv(CAUSES_DIR / "composants_par_site.csv")
-    indicators = ok.groupby("site").agg(
-        incidents=("incident_id", "count"),
-        pct_lie_vieillissement=("lie_vieillissement", lambda s: round(100 * s.astype(bool).mean(), 1)),
-        pct_lie_maintenance=("lie_maintenance", lambda s: round(100 * s.astype(bool).mean(), 1)),
-        pct_maintenance_suspectee=("maintenance_suspectee", lambda s: round(100 * (s == "probable").mean(), 1)),
-        cout_moyen_eur=("estimated_cost_eur", lambda s: round(s.mean())),
-        arret_moyen_h=("downtime_hours", lambda s: round(s.mean(), 1)),
-        pct_confiance_faible=("confiance", lambda s: round(100 * (s == "faible").mean(), 1)),
-    )
-    indicators.to_csv(CAUSES_DIR / "indicateurs_par_site.csv")
+    contributives = contributives_by_site(ok)
+    contributives.to_csv(CAUSES_DIR / "contributives_par_site.csv")
 
-    print(f"\nSauvegardé dans {CAUSES_DIR}/ : incidents_causes.csv, facteurs_par_site.csv, "
-          "composants_par_site.csv, indicateurs_par_site.csv")
+    print(f"\nSauvegardé dans {CAUSES_DIR}/ : incidents_causes.csv, contributives_par_site.csv")
     if len(ok) < len(out):
         print(f"{len(out) - len(ok)} incidents non analysés (colonne erreur_analyse)")
-    print("\nFacteurs dominants par site :")
-    factors = percent_by_site(ok, "facteur_principal").drop(index=UNDETERMINED, errors="ignore")
-    for site in factors.columns:
-        top = factors[site].sort_values(ascending=False).head(3)
-        print(f"  {site:22s} " + ", ".join(f"{f} {p:.0f} %" for f, p in top.items()))
-    print("\n" + indicators.to_string())
+    print("\n" + contributives.to_string())
     return CAUSES_DIR
 
 
@@ -158,4 +168,3 @@ def main() -> None:
     parser.add_argument("--workers", type=int, default=WORKERS, help="appels LLM en parallèle")
     args = parser.parse_args()
     run(args.input, args.workers)
-

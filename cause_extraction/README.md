@@ -1,9 +1,9 @@
-# Cause racine de chaque incident
+# Causes de chaque incident
 
 Le topic modeling regroupe les incidents par **type d'événement** (incendie, surtension...),
 parce qu'une description mélange ce qui s'est passé, pourquoi, et ce qui a été fait. Or le sujet
-demande les **causes racines**. Cette étape fait lire chaque rapport au LLM et lui demande une
-analyse structurée.
+demande les **causes**. Cette étape fait lire chaque rapport au LLM et lui demande une analyse
+structurée : une cause racine, des causes contributives, et le reste.
 
 ```bash
 python -m cause_extraction          # lancement seul, pour explorer
@@ -13,23 +13,23 @@ python -m cause_extraction          # lancement seul, pour explorer
 
 | Champ | Contenu |
 |---|---|
-| `composant` | composant touché, parmi une liste fermée (définie au cadrage) |
-| `cause_racine` | **pourquoi**, en une phrase, en remontant à la cause première |
+| `cause_racine` | **pourquoi**, en une phrase, en remontant au phénomène qui a déclenché l'enchaînement (pas au symptôme final) |
 | `cause_type` | `explicite` (écrite dans la description), `inférée` (désignée par un indice concret de la description ; la météo du jour seule ne suffit pas) ou `inconnue` (sinon, et en cas de doute) |
-| `indice` | extrait de la description **recopié mot pour mot** qui justifie la cause. **Vérifié par le code** : s'il ne figure pas dans le rapport (à 80 % près, sans tenir compte des accents), la cause est annulée et devient `inconnue` (la proposition du LLM est gardée dans `cause_annulee`) |
+| `indice` | extrait de la description **recopié mot pour mot** qui justifie la cause racine. **Vérifié par le code** : s'il ne figure pas dans le rapport (à 80 % près, sans tenir compte des accents), la cause est annulée et devient `inconnue` (la proposition du LLM est gardée dans `cause_annulee`) |
+| `causes_contributives` | 0 à 4 **conditions** qui ont permis l'incident ou l'ont aggravé (sans être le déclencheur). Chacune : `texte`, `type` (`explicite` ou `inférée`), `indice`. **Vérifiées une à une** : un extrait absent du rapport écarte la condition |
 | `consequence` | **ce que l'incident a provoqué** (dégât, arrêt, risque), sans la cause ni durée ni montant |
-| `categorie_consequence` | la même conséquence dans une liste fermée (définie au cadrage, plus « autre ») |
-| `facteur_principal` | parmi une liste fermée (définie au cadrage, plus « indéterminé ») |
-| `facteurs_secondaires` | autres facteurs ayant contribué |
-| `lie_vieillissement`, `lie_maintenance` | l'âge ou la maintenance ont-ils joué un rôle ? |
-| `maintenance_suspectee`, `justification_maintenance` | hypothèse : un défaut de maintenance a-t-il pu laisser l'incident se produire, **d'après la conséquence** et l'état constaté (non / plausible / probable) ? Champ séparé : ne modifie jamais `cause_racine` ni `cause_type` ; indicateur secondaire, hors attribution des profils |
+| `composant_brut` | le composant touché, avec les mots du rapport (non normalisé à ce stade) |
+| `maintenance_suspectee`, `justification_maintenance` | hypothèse : un défaut de maintenance a-t-il pu laisser l'incident se produire, **d'après la conséquence** et l'état constaté (non / plausible / probable) ? Champ séparé : ne modifie jamais `cause_racine` ni `cause_type` |
 | `action_corrective` | ce qui éviterait que ça se reproduise (base du plan de remédiation) |
 | `confiance` | faible / moyenne / haute |
 
+Règle de l'extrait, commune à la cause racine et aux causes contributives : **pas d'indice vérifié,
+pas de cause**. Le code compte les causes contributives écartées (`contributives_rejetees`), ce qui
+mesure la part des propositions du LLM qui ne reposent pas sur le rapport.
+
 Choix de conception :
-- **Listes fermées** : on peut compter et comparer les sites. Elles ne sont pas écrites en dur : le
-  cadrage ([`framing/`](../framing/README.md)) les déduit du contexte écrit par l'utilisateur et d'un
-  échantillon des descriptions.
+- **Pas de liste fermée** : causes, composants et conséquences sont écrits avec les mots du rapport.
+  Les thèmes seront découverts ensuite à partir de ces textes.
 - **Format JSON imposé** (*structured outputs*) : la réponse est toujours analysable.
 - **Le site n'est pas donné au LLM** (ni les identifiants d'équipement et de technicien, qui le contiennent) : l'analyse ne doit pas être influencée par ce qu'on sait du
   site, sinon associer ensuite un site à son profil serait circulaire.
@@ -44,8 +44,4 @@ le cache des réponses est partagé, donc rien n'est jamais analysé deux fois.
 | Fichier | Contenu |
 |---|---|
 | `incidents_causes.csv` | chaque incident avec son analyse (`erreur_analyse` non vide si l'appel a échoué) |
-| `facteurs_par_site.csv` | % des incidents de chaque site par facteur principal |
-| `composants_par_site.csv` | % des incidents de chaque site par composant |
-| `indicateurs_par_site.csv` | part liée à l'usure, à la maintenance, coût et durée moyens, part de confiance faible |
-
-`facteurs_par_site.csv` et `indicateurs_par_site.csv` montrent ce qui distingue chaque site.
+| `contributives_par_site.csv` | par site : nombre moyen de causes contributives vérifiées, % écartées, % de maintenance suspectée probable, coût et durée moyens |
