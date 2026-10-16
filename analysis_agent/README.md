@@ -1,119 +1,104 @@
 # Étape 2 : workflow d'analyse
 
-Analyse les 1800 incidents et produit le **rapport d'analyse** (`outputs/2_analyse/rapport_analyse.md`) :
-causes racines, chaînes cause → conséquence, caractérisation de chaque site (ou association à un
-profil, si le contexte en décrit), plan de remédiation par site et priorisation sur l'ensemble des sites.
+Analyse les incidents et produit le **rapport d'analyse** (`outputs/2_analyse/rapport_analyse.md`) :
+causes racines découvertes dans les données, causes contributives, chaînes cause → conséquence,
+caractérisation de chaque site (ce qui le distingue des autres sites de son segment), **plan d'actions**
+(une mesure par couple site × cause, dans la limite de 80 % du coût et de 12 mesures) et causes isolées.
 
-L'agent ne sait **rien du problème a priori** : segments, facteurs, composants, catégories de
-conséquence, profils éventuels et mesures préventives types viennent du **cadrage**
-([`framing/`](../framing/README.md)), déduit de `context/contexte.md` et des données.
+L'agent ne sait **rien du problème a priori** : domaine, segments, libellés et ordre des sévérités
+viennent du **cadrage** ([`framing/`](../framing/README.md)), déduit de `context/contexte.md` et des
+données. Aucune liste de causes, de facteurs ou de profils n'est fixée à l'avance.
 
 ```bash
 python main.py --steps analyse       # ou : python -m analysis_agent
 ```
 
+Premier lancement sur de vraies données : toutes les étapes d'appel au LLM sont refaites (extraction,
+affectation, composants, rédaction, juge).
+
 ## Le principe
 
-- **Le code fixe l'ordre des phases.** Un petit modèle (gpt-4.1-nano) se perd dans un long plan ;
-  il suit bien une consigne courte avec 2 ou 3 outils.
-- **L'agent LLM décide** dans chaque phase : réglages de clustering, nom et regroupement des
-  thèmes, profil de chaque site.
+- **Le code fixe l'ordre des phases.** Un petit modèle se perd dans un long plan ; il suit bien une consigne
+  courte avec 2 ou 3 outils.
+- **L'agent LLM décide** dans chaque phase : réglages de clustering, nom et regroupement des thèmes,
+  chaînes prioritaires, arrêts nominaux.
 - **Le code calcule tous les chiffres** (`facts.py`) et refuse toute décision hors bornes.
+- **Le LLM affecte chaque phrase à un thème ou à « aucun »**, par lots (`assignment.py`) ; le code relance le
+  clustering sur les phrases « aucun » tant qu'elles sont trop nombreuses.
 - **Le LLM ne rédige qu'en reformulant des faits calculés**, et un validateur vérifie chaque texte
-  (`writing.py`).
+  (`writing.py`). Un juge relit ensuite, et sa correction n'est acceptée que si elle passe le même validateur
+  (`judge.py`).
 
 ```
-0. code       extraction : cause, type de cause, conséquence, catégorie de conséquence (LLM, en cache)
-1. agent      pour chaque segment × (causes, conséquences) : clustering, puis nommage des thèmes
-2. agent      priorités : heatmap thèmes de causes × thèmes de conséquences -> chaînes prioritaires
-3. agent      profils (seulement si le contexte en décrit) : points distinctifs -> profil de chaque site ;
-              sinon chaque site est caractérisé par ce qui le distingue des autres sites de son segment
-4. code + LLM rédaction : faits Python -> reformulation LLM -> validateur -> texte Python si échec
-              (plans par site, fiche + criticité Pareto de chaque cause, synthèse) ; puis juge
+0.  code      extraction par incident : cause racine, causes contributives (avec extrait vérifié), conséquence
+0b. code+LLM  composants bruts de chaque segment regroupés (normalisation, toutes les valeurs rangées)
+1.  pour chaque segment × (causes, conséquences) :
+      a. agent    clustering : essais de min_cluster_size, choix (select_clustering)
+      b. agent    thèmes : nommer / regrouper les clusters (define_theme, merge_themes)
+      c. code+LLM affectation : chaque phrase -> un thème ou « aucun » (assign_phrases) ;
+                  tant que « aucun » > 5 % (au plus 2 tours) : reclustering des seules phrases « aucun »,
+                  thèmes nommés par l'agent sur cet essai, réaffectation des seules phrases restées « aucun »
+2.  agent     priorités : heatmap causes × conséquences -> chaînes prioritaires (select_priority_chains)
+3.  agent     arrêts nominaux : thèmes de conséquences qui sont un fonctionnement normal de protection
+              (flag_nominal, refusé si moins de 80 % des incidents du thème sont à la gravité la plus faible)
+4.  code+LLM  rédaction : caractérisation et causes dominantes de chaque site, une mesure par couple
+              (site, cause) du plan, fiche de chaque cause, synthèse ; puis relecture par le juge
 ```
 
-Si l'agent n'atteint pas l'objectif d'une phase, le code la termine (meilleur clustering conforme ;
-thème nommé par sa catégorie ou son facteur dominant ; profils selon les règles d'attentes) et le
-signale dans le journal et dans le rapport (« nommé par : code », « attribution automatique »).
+Si l'agent n'atteint pas l'objectif d'une phase, le code la termine (meilleur clustering conforme ; thème
+nommé d'après ses mots-clés ; chaînes les plus coûteuses ; aucun arrêt nominal) et le signale dans le
+journal et dans le rapport (« nommé par : code », « CHOIX AUTOMATIQUE »).
 
 ## Phase 0 : extraction (`cause_extraction/`)
 
-Pour chaque incident, le LLM renvoie un JSON imposé : `cause_racine`, `cause_type` (explicite,
-inférée, ou inconnue) et `indice` (extrait du rapport recopié mot pour mot, **vérifié par le code** :
-sans extrait retrouvé, la cause est annulée), `consequence` et `categorie_consequence` (liste
-fermée : perte de production, arrêt de sécurité, déclenchement de protection, dégât mineur, dégât
-majeur, incendie...), facteur principal, composant, liens avec l'usure et la maintenance, action
-corrective. Toutes les formulations de « cause non précisée » sont ramenées à une seule valeur ; ces
-incidents sont **exclus du clustering des causes** et comptés à part.
+Pour chaque incident, le LLM renvoie un JSON imposé : `cause_racine` (le phénomène qui a déclenché la
+chaîne), `cause_type` (explicite, inférée ou inconnue) et `indice` (extrait recopié du rapport), 0 à 4
+**causes contributives** (conditions qui ont rendu l'incident possible ou pire, chacune avec son propre
+extrait), la `consequence` en texte libre, le `composant_brut`, l'hypothèse de maintenance et l'action
+corrective. Le code vérifie chaque extrait : une cause sans extrait retrouvé est annulée, une cause
+contributive sans extrait est écartée et comptée (`contributives_rejetees`). Les incidents dont la cause
+est inconnue ou inférée avec une confiance faible sont exclus de la découverte et comptés à part.
 
-## Phase 1 : clustering et thèmes (agent)
+## Phase 1 : clustering, thèmes, affectation
 
-**Clustering** (`run_clustering`, `select_clustering`) : UMAP + HDBSCAN (méthode BERTopic) sur les
-phrases de causes ou de conséquences, sans nombres ni mots génériques ; `min_cluster_size` entre
-**5 et 50**, **5 essais max**. Chaque essai reçoit une qualité en mots fixée par des seuils (DBCV <
-0.5 = séparation faible). Le choix est refusé si l'essai n'est pas conforme (stabilité < 0.8, non
-classés > 15 %, clusters hors 3–40), ou s'il a une séparation faible alors qu'un essai conforme de
-séparation au moins moyenne existe.
+**Clustering** (`run_clustering`, `select_clustering`) : UMAP + HDBSCAN sur les phrases de causes (racines
+et contributives) ou de conséquences, par segment. `min_cluster_size` entre **5 et 50**, **5 essais max**.
+Chaque essai reçoit une qualité en mots, fixée par des seuils (DBCV, stabilité, non classés, nombre de
+clusters). Le choix est refusé si l'essai n'est pas conforme.
 
-**Thèmes** : les clusters sont décrits dans la consigne (facteur ou catégorie dominant, mots-clés,
-phrases typiques), avec les **fusions suggérées par le code**.
+**Thèmes** : les clusters sont décrits dans la consigne (mots-clés, phrases typiques, fusions suggérées par
+le code). L'agent appelle `define_theme` (un thème = un ou plusieurs clusters) et `merge_themes`. Un nom de
+cause qui contient une conséquence (arrêt, perte, incendie...) est refusé. Une fusion est refusée si les
+phrases réunies sont nettement moins semblables que dans les clusters d'origine.
 
-| Outil | Ce qu'il fait | Contrôles |
-|---|---|---|
-| `define_theme(name, topics)` | crée un thème (plusieurs clusters = fusion) | un cluster déjà rangé est ignoré ; nom de cause refusé s'il contient une conséquence, « incendie », « détection » ou « indéterminé » ; fusion refusée si les facteurs (causes) ou catégories (conséquences) dominants diffèrent, ou si la cohésion chute |
-| `compare_clusters(a, b)` | similarité des centres de deux clusters, facteur dominant de chacun, exemples, avis de fusion | — |
-| `merge_themes(theme_ids, name)` | fusionne des thèmes déjà créés (doublon) | mêmes contrôles que `define_theme` |
+**Affectation** (`assignment.py`, `tools.py`) : chaque phrase reçoit l'identifiant de son thème, ou
+`aucun` si aucun thème ne décrit le même phénomène (le LLM ne doit jamais forcer). Les appels sont
+groupés par lots de 20 phrases ; une réponse absente ou invalide donne « aucun ».
 
-**Règle de doublon** : deux clusters ou thèmes dont les centres ont une similarité ≥ 0.8 **et** le même
-facteur (ou catégorie) dominant. La similarité seule ne suffit pas : sur nos données, « maintenance »
-et « usure » sont à 0.85 sans être la même cause, alors que les vrais doublons étaient à 0.80 et 0.84
-avec le même facteur. La phase ne se termine que lorsqu'il ne reste **ni cluster sans thème, ni
-doublon** ; sinon le code complète et fusionne lui-même (signalé).
+**Reprise** (`recluster_none`) : HDBSCAN relancé sur les seules phrases « aucun » (au moins 5 par cluster).
+L'essai de reprise est thématisé par l'agent, puis seules les phrases restées « aucun » sont réaffectées.
+La boucle s'arrête quand la part de « aucun » est ≤ 5 % ou après 2 reprises. Ce qui reste est présenté
+comme **causes isolées** (section 9 du rapport) : ce n'est pas un défaut caché.
 
-## Phase 2 : chaînes prioritaires sur la heatmap (agent)
+## Phase 2 : chaînes prioritaires (agent)
 
-La heatmap croise, pour chaque type, les thèmes de causes **connues** (lignes) et les thèmes de
-conséquences (colonnes) ; une case = nombre d'incidents et coût total (arrêts de sécurité nominaux
-exclus). Elle est calculée en Python (`facts.chain_stats`, `facts.heatmap`), exportée en PNG et CSV
-et affichée dans la webapp.
+La heatmap croise les thèmes de causes **connues** (lignes) et les thèmes de conséquences (colonnes) ; une
+case = nombre d'incidents et coût total (arrêts nominaux exclus).
 
 | Outil | Ce qu'il fait | Bornes et contrôles |
 |---|---|---|
-| `heatmap_hotspots(site=None, top_k)` | cases les plus coûteuses (id, cause, conséquence, incidents, coûts, arrêt, part du coût, part de maintenance suspectée), sur le type ou sur un site | `top_k` entre 1 et **10** ; site du type seulement ; thèmes faits |
-| `select_priority_chains(chains, justification)` | **outil final** : chaînes cause → conséquence prioritaires | **3 à 5** chaînes, toutes parmi les 10 cases les plus coûteuses du type ; justification refusée si elle cite un chiffre absent des cases (validateur de la rédaction) |
+| `heatmap_hotspots(site=None, top_k)` | cases les plus coûteuses, sur le segment ou sur un site | `top_k` entre 1 et 10 |
+| `select_priority_chains(chains, justification)` | **outil final** : chaînes cause → conséquence prioritaires | **3 à 5** chaînes parmi les cases proposées |
 
-L'agent peut faire passer une conséquence grave (incendie, destruction) avant une conséquence
-fréquente et bénigne. S'il ne choisit pas, le code prend les 3 cases les plus coûteuses (signalé).
-Les chaînes alimentent la synthèse et la section 5 du rapport.
+S'il ne choisit pas, le code prend les 3 cases les plus coûteuses (signalé).
 
-## Hypothèse « manque de maintenance »
+## Phase 3 : arrêts de sécurité nominaux (agent)
 
-L'extraction renvoie aussi `maintenance_suspectee` (non / plausible / probable) et
-`justification_maintenance` : le LLM juge, **d'après la conséquence et l'état constaté**
-(encrassement accumulé, corrosion avancée, usure poussée...), si un défaut de maintenance a pu laisser
-l'incident se produire. C'est un champ **séparé** : `cause_racine` et `cause_type` restent stricts
-(indice vérifié). La part « probable » est un **indicateur secondaire** (`config.MAINTENANCE_INDICATOR`) :
-montrée dans `site_evidence`, la heatmap, les fiches et le rapport, mais jamais critère d'un profil,
-donc sans effet sur l'attribution des profils.
-
-## Fiches des causes et criticité Pareto (repris de la branche octave)
-
-Chaque thème de cause connue reçoit une **criticité Pareto** (`facts.cause_criticality`) : thèmes
-triés par coût total, part cumulée ≤ 70 % critique, ≤ 90 % élevée, ≤ 98 % moyenne, sinon faible
-(le premier est toujours critique). Le LLM rédige sa **fiche** (`writing.cause_sheets`) : description,
-conséquences les plus coûteuses (lues dans la heatmap), mesure préventive et mécanisme. Mêmes règles
-que les plans : faits calculés, validateur, catalogue de secours, puis relecture de la mesure par le juge.
-
-## Phase 3 : profils (agent, seulement si le contexte décrit des profils)
-
-Les profils et leurs attentes (« tel critère élevé / faible sur ce site ») sont tirés du contexte au
-cadrage ; un segment n'a de profils que s'il y en a autant que de sites. Les critères mesurés sont les
-facteurs du cadrage et deux indicateurs de l'extraction (usure / âge, maintenance).
-
-| Outil | Ce qu'il fait | Bornes et contrôles |
-|---|---|---|
-| `site_evidence(asset_type)` | pour chaque site : **points distinctifs** (critères où il est seul en tête ou en queue avec un écart net), causes connues les plus fréquentes, part de causes non précisées ; critères des profils mesurés sur chaque site | — |
-| `assign_profiles(assignments)` | associe chaque site à un profil | tous les sites des segments à profils ; **chaque profil une fois** par segment ; refusée si elle respecte moins d'attentes que la meilleure |
+Un arrêt nominal est le fonctionnement normal d'une protection (arrêt de sécurité automatique sans dommage),
+pas une panne. L'agent lit `nominal_evidence` (incidents, part à la gravité la plus faible, coût moyen,
+exemples) puis appelle `flag_nominal`. Le code refuse tout thème dont moins de **80 %** des incidents sont à
+la gravité la plus faible. Une liste vide est permise : sans arrêt nominal, la perte est comptée comme une panne.
+Les incidents nominaux sont présentés à part (perte structurelle) et exclus du plan et de la priorisation.
 
 ## Phase 4 : rédaction contrôlée (`facts.py`, `writing.py`)
 
@@ -121,70 +106,48 @@ Tout ce que le rapport affirme est calculé en Python :
 
 | Fait | Calcul |
 |---|---|
-| Points distinctifs | critère où le site est seul en tête (ou en queue), avec au moins 3 points d'écart et 1.5 fois la valeur suivante ; critères à 0 % ou égaux partout ignorés |
-| Causes dominantes | 3 thèmes de causes **connues** les plus fréquents du site (hors « non précisée » et « non classé ») |
-| Plan d'actions | 3 causes connues au plus fort **coût total** (fréquence × coût moyen), **hors arrêts de sécurité nominaux** ; priorité selon leur part du coût du site (≥ 25 % haute, ≥ 10 % moyenne) |
-| Arrêts de sécurité nominaux | catégorie de conséquence marquée « fonctionnement normal » au cadrage, avec la sévérité la plus faible : la protection a fonctionné, ce n'est pas une panne ; présentés à part comme perte structurelle liée à l'exposition du site, avec des leviers d'optimisation, et exclus des plans et de la priorisation |
-| Priorisation sur l'ensemble des sites | 8 couples (site, cause) au plus fort coût, hors arrêts nominaux, avec le coût par an |
-| Origine des causes | part de causes explicites / inférées parmi les causes dominantes de chaque site |
-| Robustesse | meilleure association site → profil recalculée avec les **seules causes explicites** : identique ou non |
-| Écarts au profil | attentes des profils (tirées du contexte au cadrage) comparées aux mesures |
-| Pourcentages | **toujours** en part de l'ensemble des incidents du site |
+| Caractérisation d'un site | critères où le site est nettement en tête ou en queue de son segment (« points distinctifs ») ; un critère par thème de cause, mesuré comme cause racine **ou** contributive |
+| Causes dominantes | 3 thèmes de causes **connues** les plus fréquents du site |
+| Couples du plan | par (site, thème de cause) : incidents, coût total, coût par an ; au moins 5 incidents ; hors arrêts nominaux |
+| Portée | « spécifique au site » si le site est nettement en tête sur ce thème, sinon « commun au segment » |
+| Plan | couples classés par coût par an, gardés jusqu'à 80 % du coût des causes connues (le couple qui franchit le seuil est gardé), au plus **12** mesures |
+| Causes isolées | phrases de cause sans thème, après les reprises |
+| Synthèse | coût total, causes non précisées, arrêts nominaux, couverture du plan, 3 mesures prioritaires, chaînes |
 
-Le LLM reformule ces faits : justification du profil, causes dominantes, synthèse, et pour chaque
-cause du plan une **mesure préventive ou organisationnelle à l'échelle du site** (type : programme
-d'inspection, nettoyage planifié, équipement de protection, procédure, monitoring...), avec son
-**mécanisme** (pourquoi elle réduit la cause). Le **validateur** rejette un texte si :
-- un nombre cité n'existe pas dans les faits (arrondi toléré, « 1,4 M€ » accepté) ;
-- un phénomène cité (un facteur du cadrage, reconnu par ses mots-clés ; l'âge ou l'environnement du site) est absent des faits ;
-- il contient le mot « rang » ;
-- une mesure est vague (« renforcer la maintenance ») ou curative (commence par « remplacer »,
-  « réparer »...), ou son mécanisme ne parle pas de la cause.
+**Une mesure par couple (site, cause)** : le LLM rédige UNE action terrain sur ce site contre cette cause
+(quoi, sur quel équipement, à quelle fréquence ou sur quel déclencheur), avec son mécanisme. Le
+**validateur** rejette une mesure si :
+- elle est curative (« remplacer », « réparer »...) ou vague (« renforcer la maintenance ») ;
+- elle ne nomme pas le site (ni « ce site ») ou cite un autre site du jeu de données ;
+- son mécanisme ne parle pas de la cause ;
+- un nombre cité ou un phénomène (mot d'un nom de thème) est absent des faits.
 
-Si le LLM échoue, la mesure vient de la **mesure préventive type du facteur**, proposée au cadrage.
+Après `WRITE_RETRIES` reprises, la mesure devient **« À définir »** : le texte donne le site, la cause, les
+incidents et le coût par an, sans action inventée. Les fiches de cause (`cause_sheets`) gardent une
+description et les conséquences typiques, sans mesure ; elles indiquent les sites qui ont une mesure
+pour leur cause.
 
-Si le site ne vérifie nettement aucune attente de son profil, la justification doit dire qu'il est
-**attribué par élimination**.
+Le validateur de texte refuse aussi le mot « rang », les nombres absents des faits et les phénomènes
+absents des faits (âge et environnement du site inclus).
 
 ## Relecture par le juge (`judge.py`)
 
-Chaque texte (justification, causes dominantes, chaque mesure, synthèse) est relu séparément par un
-juge LLM avec une **grille** : affirmation absente des faits, extrapolation (« coût faible donc bonne
-maintenance »), mesure générique (équipement ? défaut visé ? fréquence ? réduit vraiment la cause ?),
-mécanisme circulaire, synthèse sans site ni coût, coquilles. Le juge propose une correction ; **le code
-ne l'accepte que si elle passe le même validateur** que la rédaction, sinon le texte d'origine est
-gardé. Chaque décision est dans le journal et le décompte dans l'en-tête du rapport.
-
-## Validation manuelle des causes inférées
-
-`validation_inferences.py` tire (graine fixe) 20 incidents à cause inférée par type d'installation
-dans `outputs/validation/inferences_a_valider.csv`, avec une colonne vide `verdict_humain` à remplir
-(« oui » / « non »). Le fichier est créé une seule fois et **jamais écrasé**. Le rapport affiche le
-taux d'accord s'il est rempli, sinon « validation manuelle en cours ».
-
-Le LLM réessaie 2 fois avec la liste des erreurs, puis le texte est remplacé par une phrase
-générée en Python ; c'est consigné dans `journal.md`.
+Un passage par texte (caractérisation, causes dominantes, chaque mesure non « À définir », synthèse). Le juge
+reçoit le texte, ses faits et une grille de questions, et renvoie les problèmes et une correction. Le code
+accepte la correction seulement si elle passe le validateur de la rédaction. Chaque décision est consignée
+dans le journal.
 
 ## Sorties (`outputs/2_analyse/`)
 
 | Fichier | Contenu |
 |---|---|
-| `rapport_analyse.md` | le livrable (10 sections) |
-| `heatmap_<type>.png` / `.csv` | heatmap thèmes de causes × thèmes de conséquences |
+| `rapport_analyse.md` | le rapport : synthèse, méthode, thèmes, causes, heatmap, fiches, sites, plan d'actions, causes isolées, arrêts nominaux, limites |
+| `journal.md` / `journal.json` | déroulé complet, phase par phase |
+| `decisions.json` | clusterings choisis, rapport (`sites`, `mesures`, `couverture`, `fiches`, `synthese`, `juge`), arrêts nominaux, causes isolées, composants normalisés, essais |
+| `clustering_essais.csv` | scores de chaque essai (les reprises sont marquées) |
+| `themes.csv` | thèmes de causes et de conséquences |
+| `phrases.csv` | chaque phrase de cause ou de conséquence, avec son thème (vide = isolée) |
+| `mesures.csv` | plan d'actions : une ligne par couple (site, cause) |
 | `fiches_causes.csv` | fiche et criticité Pareto de chaque thème de cause |
-| `journal.md` / `journal.json` | chaque phase : raisonnement, outils, refus, rédaction (essais, erreurs du validateur), reprises par le code |
-| `incidents_analyse.csv` | chaque incident : cause, type de cause, conséquence, catégorie, clusters, thèmes, action |
-| `themes.csv` | thèmes de causes et de conséquences, avec qui les a nommés |
-| `clustering_essais.csv` | scores et qualité de chaque essai |
-| `decisions.json` | clusterings choisis, profils, contenu du rapport |
-
-## Modèles
-
-Chaque usage peut avoir son propre déploiement Azure dans le `.env` (voir `.env.example`) :
-`AZURE_OPENAI_CHAT_DEPLOYMENT_EXTRACTION`, `..._ANALYSIS`, `..._WRITING`, `..._REVIEW`. Sans ces
-variables, `AZURE_OPENAI_CHAT_DEPLOYMENT` est utilisé partout (aujourd'hui gpt-4.1-nano).
-
-## Coût et reproductibilité
-
-Toutes les réponses du LLM sont en cache (`outputs/cache/llm/`), avec une température de 0 :
-relancer rejoue tout sans aucun appel. Changer un prompt ou une borne relance seulement ce qui en dépend.
+| `heatmap_<segment>.csv/.png` | heatmap causes × conséquences (coût, incidents) |
+| `incidents_analyse.csv` | chaque incident : cause, conséquence, thèmes, composant, arrêt nominal |

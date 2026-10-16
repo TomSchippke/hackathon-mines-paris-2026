@@ -1,12 +1,12 @@
 """Juge : relit chaque texte du rapport avec une grille précise et propose une correction.
 
-Un texte à la fois (justification d'un profil, causes dominantes, chaque mesure du plan, mesure de
-chaque fiche de cause, synthèse) :
+Un texte à la fois (caractérisation d'un site, causes dominantes, chaque mesure du plan, synthèse ; les
+mesures « À définir » ne sont pas relues) :
   1. le juge (LLM, usage « review ») reçoit le texte, les faits sur lesquels il repose et une grille
      de questions ; il renvoie les problèmes trouvés et un texte corrigé ;
   2. le CODE tranche : la correction n'est acceptée que si elle passe le même validateur que la
-     rédaction (chiffres et phénomènes présents dans les faits, mesure préventive...). Sinon le texte
-     d'origine est gardé. Un juge trop zélé ne peut donc pas dégrader le rapport.
+     rédaction (chiffres et phénomènes présents dans les faits, mesure préventive sur ce site...). Sinon le
+     texte d'origine est gardé. Un juge trop zélé ne peut donc pas dégrader le rapport.
 Chaque décision est consignée dans le journal.
 """
 
@@ -14,17 +14,17 @@ from __future__ import annotations
 
 import json
 
+import pandas as pd
+
 from llm.client import chat
 
-from framing.cadrage import current
+from .config import JUDGE_ROLE, TO_DEFINE
+from .writing import cause_names, concept_patterns, measure_errors, numbers, text_errors
 
-from .config import JUDGE_ROLE
-from .writing import measure_errors, numbers, text_errors
-
-GRID_JUSTIFICATION = """1. Chaque affirmation (chiffre, phénomène) figure-t-elle dans les faits ?
+GRID_CARACTERISATION = """1. Chaque affirmation (chiffre, phénomène) figure-t-elle dans les faits ?
 2. Y a-t-il une extrapolation non mesurée (déduire la qualité de la maintenance, l'âge ou la localisation, \
 interpréter un coût) ?
-3. Si les faits indiquent « attribué par élimination », le texte le dit-il clairement ?
+3. Le texte dit-il bien ce qui distingue le site, ou qu'aucun critère ne le distingue, sans rien inventer d'autre ?
 4. Coquilles, répétitions, formulation maladroite ?"""
 
 GRID_CAUSES = """1. Les causes citées sont-elles les plus fréquentes des faits, dans le bon ordre ?
@@ -36,8 +36,9 @@ GRID_MEASURE = """1. La mesure nomme-t-elle un équipement précis ?
 3. Indique-t-elle une fréquence ou un déclencheur (après chaque épisode à risque, avant la saison à risque...) ?
 4. Réduit-elle vraiment la cause, ou se contente-t-elle de la surveiller ?
 5. Le mécanisme est-il concret, et non circulaire (pas « une inspection régulière permet de détecter ») ?
-La correction doit rester une mesure PRÉVENTIVE ou organisationnelle à l'échelle du site, jamais une \
-réparation ponctuelle."""
+6. Nomme-t-elle ce site (ou « ce site ») et une action de terrain, et non une action générique ?
+La correction doit rester une mesure PRÉVENTIVE ou organisationnelle sur CE site, jamais une \
+réparation ponctuelle ni une mesure d'un autre site."""
 
 GRID_SYNTHESIS = """1. Chaque mesure prioritaire citée a-t-elle son site, sa cause et son coût par an ?
 2. Les priorités sont-elles formulées sans redondance ?
@@ -74,41 +75,35 @@ def decide(name: str, verdict: dict, errors: list[str], changed: bool, journal: 
     return True
 
 
-def judge_report(report: dict, journal: list[dict]) -> dict:
-    """Relit et corrige le rapport en place. Renvoie le décompte des décisions."""
+def judge_report(report: dict, journal: list[dict], incidents: pd.DataFrame) -> dict:
+    """Relit et corrige le rapport en place (`incidents` : la table des incidents, pour les noms de thèmes et
+    les sites). Renvoie le décompte des décisions."""
     stats = {"corriges": 0, "refuses": 0, "inchanges": 0}
     text_field = {"correction": "le texte corrigé (le texte d'origine s'il n'y a rien à corriger)"}
+    sites = sorted(incidents["site"].unique())
+    patterns = {a: concept_patterns(cause_names(incidents[incidents["asset_type"] == a]))
+                for a in incidents["asset_type"].unique()}
     for s in report["sites"]:
         facts = s["faits"]
-        for field, grid in (("justification_profil", GRID_JUSTIFICATION), ("causes_dominantes", GRID_CAUSES)):
+        for field, grid in (("caracterisation", GRID_CARACTERISATION), ("causes_dominantes", GRID_CAUSES)):
             v = ask_judge(field, s[field], facts[field], grid, text_field)
-            errors = text_errors(v["correction"], facts[field])
-            if field == "justification_profil" and s["par_elimination"] and "élimination" not in v["correction"].lower():
-                errors.append("la mention « par élimination » a disparu")
+            errors = text_errors(v["correction"], facts[field], patterns[s["asset_type"]])
             if decide(f"{s['site']} / {field}", v, errors, v["correction"].strip() != s[field].strip(), journal, stats):
                 s[field] = v["correction"]
-        for p in s["plan"]:
-            hint = current().measure(p["facteur"])
-            plan_facts = (f"Cause : {p['cause']} (facteur : {p['facteur'] or 'non précisé'}) ; {p['incidents']} incidents.\n"
-                          + (f"Exemple de mesure préventive pour ce facteur : {hint[1]} ({hint[2]})." if hint else ""))
-            text = f"Mesure : {p['action']}\nMécanisme : {p['mecanisme']}"
-            v = ask_judge("mesure du plan", text, plan_facts, GRID_MEASURE,
-                          {"mesure": "la mesure corrigée", "mecanisme": "le mécanisme corrigé"})
-            errors = measure_errors(v, p["cause"], p["facteur"])
-            changed = (v["mesure"].strip(), v["mecanisme"].strip()) != (p["action"].strip(), p["mecanisme"].strip())
-            if decide(f"{s['site']} / mesure « {p['cause']} »", v, errors, changed, journal, stats):
-                p["action"], p["mecanisme"] = v["mesure"], v["mecanisme"]
-    for f in report.get("fiches", []):
-        hint = current().measure(f["facteur"])
-        sheet_facts = f["faits"] + (f"\nExemple de mesure préventive pour ce facteur : {hint[1]} ({hint[2]})." if hint else "")
-        v = ask_judge("mesure d'une fiche de cause", f"Mesure : {f['mesure']}\nMécanisme : {f['mecanisme']}", sheet_facts,
-                      GRID_MEASURE, {"mesure": "la mesure corrigée", "mecanisme": "le mécanisme corrigé"})
-        errors = measure_errors(v, f["cause"], f["facteur"])
-        changed = (v["mesure"].strip(), v["mecanisme"].strip()) != (f["mesure"].strip(), f["mecanisme"].strip())
-        if decide(f"fiche {f['asset_type']} / mesure « {f['cause']} »", v, errors, changed, journal, stats):
-            f["mesure"], f["mecanisme"] = v["mesure"], v["mecanisme"]
+    for m in report["mesures"]:
+        if m["a_definir"] or m["mesure"].startswith(TO_DEFINE):  # rien à relire : pas d'action rédigée
+            continue
+        others = [o for o in sites if o != m["site"]]
+        text = f"Mesure : {m['mesure']}\nMécanisme : {m['mecanisme']}"
+        v = ask_judge("mesure du plan", text, m["faits"], GRID_MEASURE,
+                      {"mesure": "la mesure corrigée", "mecanisme": "le mécanisme corrigé"})
+        errors = measure_errors(v, m["cause"], m["site"], others)
+        errors += text_errors(v["mesure"] + " " + v["mecanisme"], m["faits"], patterns[m["asset_type"]])
+        changed = (v["mesure"].strip(), v["mecanisme"].strip()) != (m["mesure"].strip(), m["mecanisme"].strip())
+        if decide(f"{m['site']} / mesure « {m['cause']} »", v, errors, changed, journal, stats):
+            m["mesure"], m["mecanisme"] = v["mesure"], v["mecanisme"]
     v = ask_judge("synthèse", report["synthese"], report["faits_synthese"], GRID_SYNTHESIS, text_field)
-    errors = text_errors(v["correction"], report["faits_synthese"])
+    errors = text_errors(v["correction"], report["faits_synthese"], concept_patterns(cause_names(incidents)))
     if len([x for x in numbers(v["correction"]) if x > 10]) < 3:
         errors.append("moins de 3 chiffres des faits")
     if decide("synthèse", v, errors, v["correction"].strip() != report["synthese"].strip(), journal, stats):
