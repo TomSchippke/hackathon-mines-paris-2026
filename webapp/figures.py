@@ -6,6 +6,7 @@ Rien ici ne dépend de Streamlit ; tout est lu dans les sorties de la pipeline (
 
 from __future__ import annotations
 
+import ast
 import json
 import sys
 from pathlib import Path
@@ -18,6 +19,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from analysis_agent import facts as F  # noqa: E402
+from analysis_agent.config import SCOPE_SEGMENT, SCOPE_SITE  # noqa: E402
 from framing.cadrage import current  # noqa: E402
 
 ANALYSIS = ROOT / "outputs" / "2_analyse"
@@ -28,6 +30,8 @@ TIER_COLORS = {"Critique": "#d03b3b", "Élevée": "#ec835a", "Moyenne": "#fab219
 TIERS = list(TIER_COLORS)
 # Segments (libellés du cadrage) : couleurs catégorielles, dans l'ordre des segments.
 CATEGORICAL = ["#2a78d6", "#eb6834", "#1baf7a", "#8f5bd6", "#d6a21b", "#d6457a"]
+# Portée d'une mesure : deux couleurs catégorielles, toujours légendées.
+PORTEE_COLORS = {SCOPE_SITE: CATEGORICAL[0], SCOPE_SEGMENT: CATEGORICAL[1]}
 
 
 def segment_colors() -> dict[str, str]:
@@ -59,6 +63,8 @@ def load_outputs() -> tuple[pd.DataFrame, pd.DataFrame, dict, dict | None, str]:
     incidents["type"] = incidents["asset_type"].map(current().label)
     sheets_path = ANALYSIS / "fiches_causes.csv"
     sheets = pd.read_csv(sheets_path) if sheets_path.exists() else pd.DataFrame()
+    if "sites_avec_mesure" in sheets:
+        sheets["sites_avec_mesure"] = sheets["sites_avec_mesure"].map(sites_text)
     decisions = json.loads((ANALYSIS / "decisions.json").read_text(encoding="utf-8"))
     review_path = REVIEW / "verification.json"
     review = json.loads(review_path.read_text(encoding="utf-8")) if review_path.exists() else None
@@ -74,19 +80,40 @@ def n_incidents(n: int) -> str:
     return f"{n} incident" + ("s" if n > 1 else "")
 
 
-def site_actions(decisions: dict) -> dict[tuple[str, str], str]:
-    """(site, cause) -> mesure préventive du plan du site."""
-    return {(s["site"], p["cause"]): p["action"] for s in (decisions.get("rapport") or {}).get("sites", [])
-            for p in s["plan"]}
+def theme_names() -> dict[str, str]:
+    """Nom de chaque thème (causes et conséquences) d'après themes.csv, par identifiant. Indispensable pour
+    un thème qui n'apparaît que comme cause contributive (absent des causes racines de la table)."""
+    path = ANALYSIS / "themes.csv"
+    if not path.exists():
+        return {}
+    themes = pd.read_csv(path)
+    return dict(zip(themes["theme_id"], themes["name"]))
 
 
-def fleet_table(incidents: pd.DataFrame, decisions: dict) -> pd.DataFrame:
-    fleet = F.fleet_priorities(incidents)
-    actions = site_actions(decisions)
-    fleet["mesure préventive"] = [actions.get((r.site, r.cause), "hors des 3 causes prioritaires du site")
-                                  for r in fleet.itertuples()]
-    fleet["label"] = fleet["site"] + " · " + fleet["cause"]
-    return fleet
+def sites_text(value) -> str:
+    """Liste de sites, telle qu'écrite dans fiches_causes.csv (« ['S1', 'S2'] ») ou dans decisions.json."""
+    sites = ast.literal_eval(value) if isinstance(value, str) else (value if isinstance(value, list) else [])
+    return ", ".join(sites) or "aucun"
+
+
+def measures(decisions: dict) -> list[dict]:
+    """Mesures du plan d'actions (rapport["mesures"]), classées par coût par an."""
+    return (decisions.get("rapport") or {}).get("mesures", [])
+
+
+
+
+def site_measures(decisions: dict, site: str) -> list[dict]:
+    """Mesures du plan qui concernent ce site (par identifiant, dans l'ordre du plan)."""
+    return [m for m in measures(decisions) if m["site"] == site]
+
+
+def plan_table(decisions: dict) -> pd.DataFrame:
+    """Plan d'actions : une ligne par mesure (couple site × cause), avec son statut."""
+    plan = pd.DataFrame(measures(decisions))
+    if plan.empty:
+        return plan
+    return plan.assign(statut=plan["a_definir"].map({True: "À définir", False: "rédigée"}))
 
 
 # ------------------------------------------------------------------------------------------------
@@ -147,13 +174,23 @@ def fig_risk_matrix(sheets: pd.DataFrame) -> go.Figure:
     return layout(fig, 380).update_layout(legend={"y": -0.28})  # sous le graphique : les titres des panneaux sont en haut
 
 
-def fig_fleet(fleet: pd.DataFrame) -> go.Figure:
-    fig = px.bar(fleet, x="cout_par_an", y="label", orientation="h", text=fleet["cout_par_an"].map(euros),
-                 hover_data={"incidents": True, "mesure préventive": True, "label": False},
-                 labels={"cout_par_an": "Coût par an (€)", "label": ""})
-    fig.update_traces(marker_color=HIGHLIGHT)
-    hbars(fig, list(fleet["label"]), fleet["cout_par_an"])
-    return layout(fig, 40 * len(fleet) + 80, bargap=0.35)
+def fig_plan(plan: pd.DataFrame) -> go.Figure:
+    """Plan d'actions : coût par an de chaque mesure (barres, couleur = portée) et couverture cumulée du coût
+    (ligne, axe du haut). Une mesure « À définir » est marquée dans son libellé."""
+    labels = [f"{r.id} · {r.site} · {r.cause}" + (" (à définir)" if r.a_definir else "") for r in plan.itertuples()]
+    plan = plan.assign(libelle=labels)
+    fig = px.bar(plan, x="cout_par_an", y="libelle", orientation="h", color="portee",
+                 color_discrete_map=PORTEE_COLORS, category_orders={"portee": list(PORTEE_COLORS)},
+                 text=plan["cout_par_an"].map(euros),
+                 hover_data={"incidents": True, "mesure": True, "libelle": False, "portee": False},
+                 labels={"cout_par_an": "Coût par an (€)", "libelle": "", "portee": "Portée", "mesure": "Mesure"})
+    hbars(fig, labels, plan["cout_par_an"])
+    fig.add_trace(go.Scatter(x=plan["cumul_pct"], y=labels, xaxis="x2", mode="lines+markers", name="Couverture cumulée",
+                             line={"color": MUTED, "width": 2}, marker={"size": 6, "color": MUTED},
+                             hovertemplate="%{y}<br>couverture cumulée : %{x} %<extra></extra>"))
+    fig.update_layout(xaxis2={"overlaying": "x", "side": "top", "range": [0, 105], "ticksuffix": " %",
+                              "showgrid": False, "zeroline": False, "title": "Couverture cumulée du coût (%)"})
+    return layout(fig, 40 * len(plan) + 140, bargap=0.35).update_layout(legend={"y": 1.22}, margin={"t": 80})
 
 
 def fig_heatmap(sub: pd.DataFrame, metric_label: str = "Coût total (€)") -> go.Figure | None:
@@ -218,9 +255,9 @@ def fig_cause_sites(cause_incidents: pd.DataFrame) -> go.Figure:
                        {"cout": "Coût total (€)", "site": ""})
 
 
-def fig_site_criteria(same_type: pd.DataFrame, site: str) -> go.Figure:
+def fig_site_criteria(same_type: pd.DataFrame, site: str, names: dict[str, str]) -> go.Figure:
     """Critères mesurés (en %) : le site mis en avant face aux autres sites du même segment."""
-    indicators = F.profile_indicators(same_type)
+    indicators = F.site_indicators(same_type, names)
     crit = pd.DataFrame([{"critère": c, "site": s, "valeur": v} for c, d in indicators.items() if d["unite"] == "%"
                          for s, v in d["valeurs"].items()])
     crit = crit[crit.groupby("critère")["valeur"].transform("max") > 0]

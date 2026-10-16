@@ -354,7 +354,7 @@ nominal incidents excluded.
 - Sites tab: characterisation instead of profile; site measures from `rapport["mesures"]`.
   New "Plan d'actions" view: measures ranked by cost/yr with scope badge and cumulative coverage
   (bar + cumulative line, see `fig_pareto` for style). Remove `fig_site_criteria` profile wording.
-- `tests/e2e_mock.py`: port the reference harness `plans/e2e_mock_reference.py` (current
+- `tests/e2e_mock.py`: port the reference harness (removed since; replaced by `tests/e2e_mock.py`) (current
   pipeline, mocked LLM and embeddings, synthetic data) to the new contracts: mocked extraction returns root + contributing causes with
   real quotes and one invented quote; mocked assignment maps phrases to themes by keyword and
   returns `aucun` for one synthetic "unexpected" cause; mocked components. Runs in a temp dir:

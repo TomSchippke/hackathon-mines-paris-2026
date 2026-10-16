@@ -35,7 +35,7 @@ def inference_sample(incidents: pd.DataFrame, path: Path = INFERENCE_VALIDATION)
         return path
     sample = pd.concat([g.sample(min(VALIDATION_SAMPLE, len(g)), random_state=VALIDATION_SEED)
                         for _, g in inferred.groupby("asset_type")])
-    out = sample[["incident_id", "asset_type", "site", "text", "cause_racine", "indice", "facteur_principal"]].rename(
+    out = sample[["incident_id", "asset_type", "site", "text", "cause_racine", "indice", "theme_cause"]].rename(
         columns={"text": "rapport", "cause_racine": "cause_inferee"})
     out["verdict_humain"] = ""
     out["commentaire"] = ""

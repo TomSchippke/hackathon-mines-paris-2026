@@ -8,18 +8,20 @@ outputs/
 ├── 1_extraction/            ← À UTILISER
 │   └── incidents_full.csv       les 1800 incidents, toutes colonnes remplies (PDF inclus)
 ├── 1b_cadrage/              ← À RELIRE avant l'analyse
-│   ├── cadrage.md               facteurs, composants, conséquences, profils déduits du contexte et des données
+│   ├── cadrage.md               domaine, libellés des segments, ordre des sévérités (déduits du contexte et des données)
 │   └── cadrage.json             version machine (à copier en context/cadrage.json pour la corriger)
 ├── 2_analyse/               ← À UTILISER
-│   ├── rapport_analyse.md       LE LIVRABLE : causes, sites, plan de remédiation
+│   ├── rapport_analyse.md       LE LIVRABLE : causes, sites, plan d'actions, causes isolées
 │   ├── rapport_interactif.html  le même rapport avec graphiques, en un fichier à envoyer (python main.py --steps export)
 │   ├── journal.md               toutes les décisions de l'agent (journal.json : version machine)
 │   ├── incidents_analyse.csv    chaque incident : cause, conséquence, leurs thèmes, action corrective
 │   ├── themes.csv               thèmes de causes et de conséquences nommés par l'agent
+│   ├── phrases.csv              chaque phrase de cause ou de conséquence, avec son thème (vide = cause isolée)
+│   ├── mesures.csv              plan d'actions : une mesure par couple site × cause (coût par an, portée, statut)
 │   ├── heatmap_<type>.png/.csv  heatmap thèmes de causes × thèmes de conséquences (coût, incidents)
 │   ├── fiches_causes.csv        fiche et criticité Pareto de chaque thème de cause
 │   ├── clustering_essais.csv    scores de chaque essai de clustering
-│   └── decisions.json           clusterings choisis, chaînes prioritaires et contenu du rapport
+│   └── decisions.json           clusterings choisis, chaînes prioritaires, arrêts nominaux, causes isolées, rapport
 ├── 3_verification/          ← À UTILISER
 │   ├── verification.md          verdict, contrôles automatiques, constats du vérificateur
 │   └── journal.md               déroulé de la vérification

@@ -27,7 +27,7 @@ CONFIANCE = ["faible", "moyenne", "haute"]
 
 # Hypothèse « manque de maintenance », déduite de la CONSÉQUENCE (encrassement accumulé, corrosion
 # avancée, usure non détectée...). Champ SÉPARÉ : il ne modifie jamais cause_racine ni cause_type, qui
-# restent stricts (indice vérifié). Sert d'indicateur secondaire, jamais de critère de profil.
+# restent stricts (indice vérifié). Sert d'indicateur secondaire, jamais de cause.
 MAINTENANCE_SUSPECTEE = ["non", "plausible", "probable"]
 
 # Valeur unique pour une cause inconnue. Toutes les variantes (« non précisée », « non déterminée »...)

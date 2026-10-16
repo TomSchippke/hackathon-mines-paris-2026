@@ -32,7 +32,7 @@ Choix de conception :
   Les thèmes seront découverts ensuite à partir de ces textes.
 - **Format JSON imposé** (*structured outputs*) : la réponse est toujours analysable.
 - **Le site n'est pas donné au LLM** (ni les identifiants d'équipement et de technicien, qui le contiennent) : l'analyse ne doit pas être influencée par ce qu'on sait du
-  site, sinon associer ensuite un site à son profil serait circulaire.
+  site, sinon comparer ensuite les sites entre eux serait circulaire.
 - **Température 0 et cache** des réponses (`outputs/cache/llm/`) : 1800 appels la première fois,
   aucun ensuite, résultats identiques d'un lancement à l'autre. Changer le prompt relance les appels.
 

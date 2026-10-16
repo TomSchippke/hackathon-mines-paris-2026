@@ -22,7 +22,7 @@ CONTEXT_PROMPT = CONTEXT_DIR / "contexte.md"
 # Cadrage écrit ou corrigé à la main : s'il existe, il remplace celui proposé par le LLM.
 FRAMING_OVERRIDE = CONTEXT_DIR / "cadrage.json"
 
-# Étape 1b : cadrage (listes fermées, segments, profils éventuels, déduits du contexte et des données)
+# Étape 1b : cadrage (domaine, libellés des segments, ordre des sévérités, déduits du contexte et des données)
 FRAMING_DIR = OUTPUTS / "1b_cadrage"
 FRAMING = FRAMING_DIR / "cadrage.json"
 

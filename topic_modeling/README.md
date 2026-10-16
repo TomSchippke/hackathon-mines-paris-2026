@@ -33,7 +33,7 @@ Il faut le `.env` (Azure OpenAI) pour calculer les embeddings. Une fois en cache
 |---|---|
 | `incidents_topics.csv` | Les 1800 incidents avec `topic_id` (ex. `solar_3`, `wind_-1` = non classé), `topic_label` (mots-clés) et `topic_probability`. |
 | `topic_info.csv` | Un topic par ligne : taille, mots-clés, 3 descriptions représentatives. |
-| `topics_par_site.csv` | Nombre d'incidents par topic et par site : base pour trouver les causes dominantes de chaque site et l'associer à son profil. |
+| `topics_par_site.csv` | Nombre d'incidents par topic et par site : base pour trouver les causes dominantes de chaque site. |
 | `barchart_solar.html`, `barchart_wind.html` | Mots-clés des topics, graphique interactif à ouvrir dans un navigateur. |
 
 ## Cache

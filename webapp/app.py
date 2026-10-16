@@ -1,8 +1,8 @@
 """Webapp Streamlit : le rapport d'analyse en version interactive, avec graphiques.
 
-Reprend la mise en page de la branche octave (synthèse exécutive avec Pareto, matrice de risque et
-coûts par site ; fiche diagnostic par cause ; explorateur d'incidents) et y ajoute la heatmap causes x
-conséquences, les profils de site et les plans de remédiation du workflow d'analyse.
+Synthèse exécutive (plan d'actions : une mesure par couple site × cause, couverture du coût), Pareto
+et fiches diagnostic par cause, heatmap causes x conséquences, sites (ce qui les distingue, leurs mesures,
+causes isolées), explorateur d'incidents et vérification.
 
 Les graphiques viennent de figures.py, partagé avec l'export HTML autonome (export_html.py).
 Lecture seule des sorties de la pipeline (aucun appel LLM) :
@@ -24,9 +24,9 @@ import streamlit as st
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from figures import (F, HIGHLIGHT, METRICS, TIER_COLORS, TIERS, VERDICTS, MissingOutputs, chains_frame,  # noqa: E402
-                     euros, fig_cause_consequences, fig_cause_sites, fig_chains, fig_cost_by_site, fig_fleet,
-                     fig_heatmap, fig_pareto, fig_risk_matrix, fig_site_causes, fig_site_criteria, fleet_table,
-                     load_outputs)
+                     euros, fig_cause_consequences, fig_cause_sites, fig_chains, fig_cost_by_site, fig_heatmap,
+                     fig_pareto, fig_plan, fig_risk_matrix, fig_site_causes, fig_site_criteria, load_outputs,
+                     plan_table, site_measures, theme_names)
 from analysis_agent.config import MAINTENANCE_INDICATOR  # noqa: E402
 from framing.cadrage import current  # noqa: E402
 
@@ -102,14 +102,20 @@ def tab_executive(incidents: pd.DataFrame, sheets: pd.DataFrame, decisions: dict
             st.plotly_chart(fig_risk_matrix(sheets), width="stretch")
             st.caption("Une bulle par thème de cause ; taille = arrêt total. En haut à droite : fréquent ET cher.")
 
-    st.markdown("#### Priorités sur l'ensemble des sites")
-    st.caption("Couples (site, cause connue) au plus fort coût, hors arrêts de sécurité nominaux. Le coût par an "
-               "est la borne haute de l'économie possible si la mesure supprime la cause.")
-    fleet = fleet_table(incidents, decisions)
-    st.plotly_chart(fig_fleet(fleet), width="stretch")
-    fleet["coût total"] = fleet["cout_total"].map(euros)
-    fleet["coût par an"] = fleet["cout_par_an"].map(euros)
-    st.dataframe(fleet[["site", "cause", "incidents", "coût total", "coût par an", "mesure préventive"]],
+    st.subheader("Plan d'actions")
+    plan = plan_table(decisions)
+    if plan.empty:
+        st.info("Pas de plan d'actions : aucun couple site × cause ne dépasse le seuil d'incidents.")
+        return
+    couv = report["couverture"]
+    st.metric("Plan d'actions", f"{couv['mesures']} mesures couvrent {couv['pct']} %")
+    st.caption("Un couple (site, cause connue) par mesure, classé par coût par an, hors arrêts de sécurité nominaux "
+               "(au moins 5 incidents, jusqu'à 80 % du coût, 12 mesures au plus). Le coût par an est la borne haute de "
+               "l'économie possible si la mesure supprime la cause. Une mesure « À définir » reste à rédiger par l'équipe."
+               + (" Plafond de 12 mesures atteint : les autres couples ne sont pas traités." if couv["plafond_atteint"] else ""))
+    st.plotly_chart(fig_plan(plan), width="stretch")
+    shown = plan.assign(**{"coût par an": plan["cout_par_an"].map(euros)}).rename(columns={"portee": "portée"})
+    st.dataframe(shown[["id", "site", "cause", "portée", "mesure", "coût par an", "statut"]],
                  hide_index=True, width="stretch")
 
 
@@ -171,10 +177,11 @@ def tab_sheets(incidents: pd.DataFrame, sheets: pd.DataFrame) -> None:
     shown = sub[sub["criticite"].isin(tier_filter)] if tier_filter else sub
     table = shown.assign(**{"coût total": shown["cout_total"].map(euros), "part du coût": shown["part_cout_pct"].astype(str) + " %",
                             "maintenance suspectée": shown["maintenance_suspectee_pct"].astype(str) + " %"})
+    table = table.assign(**{"sites avec mesure": shown["sites_avec_mesure"]})
     st.dataframe(table[["rang", "criticite", "cause", "incidents", "coût total", "part du coût", "consequence_principale",
-                        "maintenance suspectée", "mesure"]]
-                 .rename(columns={"criticite": "criticité", "consequence_principale": "conséquence principale",
-                                  "mesure": "mesure préventive"}), hide_index=True, width="stretch")
+                        "maintenance suspectée", "sites avec mesure"]]
+                 .rename(columns={"criticite": "criticité", "consequence_principale": "conséquence principale"}),
+                 hide_index=True, width="stretch")
 
     st.divider()
     st.subheader("Fiche diagnostic d'une cause")
@@ -185,7 +192,7 @@ def tab_sheets(incidents: pd.DataFrame, sheets: pd.DataFrame) -> None:
     st.markdown(f"""<div style="padding:16px 18px;border-radius:8px;border-left:6px solid {color};
         background-color:rgba(128,128,128,0.08);margin-bottom:16px;">
         <h3 style="margin-top:0;">{f['cause']}</h3>{tier_badge(f['criticite'])}
-        <span style="margin-left:10px;font-size:0.9rem;opacity:0.8;">Facteur dominant : {f['facteur'] or 'non précisé'}
+        <span style="margin-left:10px;font-size:0.9rem;opacity:0.8;">Composant principal : {f['composant_principal']}
         · {f['part_cout_pct']} % du coût des causes connues</span></div>""", unsafe_allow_html=True)
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Incidents", int(f["incidents"]))
@@ -199,8 +206,9 @@ def tab_sheets(incidents: pd.DataFrame, sheets: pd.DataFrame) -> None:
         st.info(f"**Ce qui se passe :** {f['description']}")
         st.warning(f"**Conséquences :** {f['consequences']}")
     with right:
-        st.markdown("#### 🛡️ Mesure préventive")
-        st.success(f"**{str(f['type']).capitalize()} :** {f['mesure']}\n\n**Mécanisme :** {f['mecanisme']}")
+        st.markdown("#### 🏭 Sites concernés")
+        st.success(f"**Sites avec une mesure du plan pour cette cause :** {f['sites_avec_mesure']}")
+        st.caption("Le texte de chaque mesure est dans le plan d'actions (synthèse) et dans l'onglet Sites.")
 
     g = incidents[(incidents["asset_type"] == asset_type) & (incidents["theme_cause"] == cause)]
     left, right = st.columns(2)
@@ -228,7 +236,7 @@ def incident_reader(r: pd.Series) -> None:
         st.write(r["text"])
         st.markdown(f"**Cause** ({r['cause_type']}) : {r['cause_racine']}  \n"
                     f"**Indice cité** : {r.get('indice') if pd.notna(r.get('indice')) and r.get('indice') else '—'}  \n"
-                    f"**Conséquence** : {r['consequence']} ({r['categorie_consequence']})  \n"
+                    f"**Conséquence** : {r['consequence']}  \n"
                     f"**Maintenance suspectée** : {r.get('maintenance_suspectee', '—')}"
                     + (f" — {r['justification_maintenance']}" if pd.notna(r.get("justification_maintenance"))
                        and r.get("justification_maintenance") else "") + "  \n"
@@ -238,14 +246,8 @@ def incident_reader(r: pd.Series) -> None:
 
 
 # ------------------------------------------------------------------------------------------------
-# Onglet 4 : profils et plans par site
+# Onglet 4 : sites (caractérisation, mesures du plan, causes isolées)
 # ------------------------------------------------------------------------------------------------
-
-def site_title(s: dict) -> str:
-    if not s["profil"]:
-        return s["site"]
-    return f"{s['site']} — profil {s['profil']}{' (par élimination)' if s.get('par_elimination') else ''}"
-
 
 def tab_sites(incidents: pd.DataFrame, decisions: dict) -> None:
     sites = (decisions.get("rapport") or {}).get("sites", [])
@@ -260,8 +262,8 @@ def tab_sites(incidents: pd.DataFrame, decisions: dict) -> None:
 
     st.markdown(f"""<div style="padding:16px 18px;border-radius:8px;border-left:6px solid {HIGHLIGHT};
         background-color:rgba(128,128,128,0.08);margin-bottom:16px;">
-        <h3 style="margin-top:0;">{site_title(s)}</h3>
-        <span style="opacity:0.8;">{current().profiles(asset_type).get(s['profil'], current().label(asset_type))}</span>
+        <h3 style="margin-top:0;">{site}</h3>
+        <span style="opacity:0.8;">{current().label(asset_type).capitalize()}</span>
         </div>""", unsafe_allow_html=True)
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Incidents", len(g))
@@ -269,31 +271,55 @@ def tab_sites(incidents: pd.DataFrame, decisions: dict) -> None:
     c3.metric("Causes non précisées", f"{F.unknown_share(g)} %")
     if "maintenance_suspectee" in g:
         c4.metric("Maintenance suspectée", f"{F.share(int((g['maintenance_suspectee'] == 'probable').sum()), len(g))} %",
-                  help="Hypothèse du LLM d'après la conséquence ; indicateur secondaire, hors attribution des profils.")
-    st.markdown(f"**{'Pourquoi ce profil' if s['profil'] else 'Ce qui distingue ce site'} :** {s['justification_profil']}")
+                  help="Hypothèse du LLM d'après la conséquence ; indicateur secondaire, hors critères de comparaison.")
+    st.markdown(f"**Ce qui distingue ce site :** {s['caracterisation']}")
+    if s["points_distinctifs"]:
+        st.markdown("**Points distinctifs :**\n" + "\n".join(f"- {p}" for p in s["points_distinctifs"]))
     st.markdown(f"**Causes dominantes :** {s['causes_dominantes']}")
 
+    names = theme_names()
     left, right = st.columns(2)
     with left:
         st.markdown("##### Critères mesurés : ce site face aux autres")
-        st.plotly_chart(fig_site_criteria(same_type, site), width="stretch")
-        st.caption(f"« {MAINTENANCE_INDICATOR} » est un indicateur secondaire : il n'entre pas dans l'attribution.")
+        st.plotly_chart(fig_site_criteria(same_type, site, names), width="stretch")
+        st.caption(f"« {MAINTENANCE_INDICATOR} » est un indicateur secondaire. Un thème de cause contributive compte "
+                   "parmi les critères du site où il apparaît.")
     with right:
         st.markdown("##### Causes du site")
         st.plotly_chart(fig_site_causes(g), width="stretch")
 
-    st.markdown("#### Plan de remédiation")
-    st.caption("Mesures préventives pour les causes connues les plus coûteuses du site, hors arrêts de sécurité "
-               "nominaux ; priorité selon leur part du coût du site (≥ 25 % haute, ≥ 10 % moyenne).")
-    plan = pd.DataFrame(s["plan"])
-    if len(plan):
-        for p in plan.itertuples():
-            with st.container(border=True):
-                a, b = st.columns([3, 1])
-                a.markdown(f"**{p.cause}** → {getattr(p, 'consequence_principale', '') or '—'}  \n"
-                           f"*{str(p.type).capitalize()} :* {p.action}  \n*Mécanisme :* {p.mecanisme}")
-                b.metric(f"Priorité {p.priorite}", euros(p.cout_total), f"{p.part_cout_pct} % du coût du site",
-                         delta_color="off")
+    st.markdown("#### Mesures du plan pour ce site")
+    st.caption("Une mesure par cause connue du site qui figure dans le plan d'actions (voir la synthèse exécutive).")
+    mine = site_measures(decisions, site)
+    if not mine:
+        st.info("Aucune cause connue de ce site n'atteint le seuil du plan.")
+    for m in mine:
+        with st.container(border=True):
+            a, b = st.columns([3, 1])
+            a.markdown(f"**{m['id']} · {m['cause']}** → {m.get('consequence_principale') or '—'}  \n"
+                       f"*{str(m['type']).capitalize()} ({m['portee']}) :* {m['mesure']}  \n"
+                       f"*Mécanisme :* {m['mecanisme'] or '—'}")
+            b.metric("Coût par an", euros(m["cout_par_an"]), f"{m['part_cout_pct']} % du coût des causes connues",
+                     delta_color="off")
+            if m["a_definir"]:
+                st.warning("Mesure à définir : les faits ne permettent pas de la rédiger.")
+
+    with st.expander("Causes isolées et arrêts nominaux, par segment"):
+        isolated_section(decisions, names)
+
+
+def isolated_section(decisions: dict, names: dict[str, str]) -> None:
+    """Causes isolées (phrases non rattachées à un thème) et arrêts nominaux, segment par segment."""
+    isoles = decisions.get("isoles") or {}
+    nominaux = decisions.get("nominaux") or {}
+    for a in current().segments:
+        iso = isoles.get(a) or {"pct": 0.0, "phrases": 0, "exemples": []}
+        st.markdown(f"**{current().label(a).capitalize()}** — causes isolées : {iso['pct']} % des phrases de cause "
+                    f"({iso['phrases']} phrases), non regroupées par l'agent.")
+        st.markdown("\n".join(f"- « {e} »" for e in iso["exemples"]) or "- aucune")
+        nom = nominaux.get(a) or {"theme_ids": [], "justification": ""}
+        names_nom = [names.get(t, t) for t in nom["theme_ids"]]
+        st.markdown(f"*Arrêts nominaux :* {', '.join(names_nom) or 'aucun thème'}. *Justification :* {nom['justification']}")
 
 
 # ------------------------------------------------------------------------------------------------
@@ -352,9 +378,9 @@ def main() -> None:
     st.title("Rapport d'analyse des incidents")
     st.caption(current().domain)
     st.markdown("Causes et conséquences de chaque incident extraites par le LLM, regroupées en thèmes par l'agent, "
-                "croisées dans une heatmap et priorisées par coût : de la synthèse au plan d'actions par site.")
+                "croisées dans une heatmap et priorisées par coût : de la synthèse au plan d'actions.")
     tabs = st.tabs(["📊 Synthèse exécutive", "🔥 Heatmap causes × conséquences", "🔍 Pareto & fiches diagnostic",
-                    "🏭 Sites & plans d'actions", "📋 Explorateur & vérification"])
+                    "🏭 Sites & mesures", "📋 Explorateur & vérification"])
     with tabs[0]:
         tab_executive(incidents, sheets, decisions)
     with tabs[1]:

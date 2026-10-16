@@ -13,7 +13,7 @@ L'agent d'analyse (analysis_agent) appelle analyse_incidents via son outil extra
 cache des réponses est partagé : ce qui a été analysé une fois ne l'est plus jamais.
 
 Le site (ni les identifiants, qui le contiennent) n'est volontairement PAS donné au LLM : l'analyse d'un incident ne doit pas être
-influencée par ce qu'on sait (ou croit savoir) du site, sinon l'association site -> profil
+influencée par ce qu'on sait (ou croit savoir) du site, sinon la comparaison des sites
 deviendrait circulaire.
 
 Lancement manuel (hors pipeline principale), sorties dans outputs/exploration/causes/ :

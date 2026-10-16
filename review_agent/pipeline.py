@@ -1,8 +1,8 @@
 """Étape 3 : agent vérificateur.
 
 Relit le travail de l'agent d'analyse (outputs/2_analyse/) et juge s'il est fiable :
-  1. contrôles automatiques par le code (clustering conforme, thèmes complets, causes extraites,
-     profils attribués une fois chacun, plan de remédiation pour chaque site) ;
+  1. contrôles automatiques par le code (clustering conforme, causes extraites, plan d'actions couvrant
+     le coût, mesures définies et préventives, causes isolées, arrêts nominaux) ;
   2. un agent LLM lit le rapport et le journal, compare les affirmations du rapport aux chiffres
      recalculés, consigne chaque problème avec sa preuve, et rend un verdict.
 Le vérificateur est en lecture seule : il ne modifie rien de l'analyse.
@@ -24,7 +24,7 @@ import json
 import pandas as pd
 
 from analysis_agent.report import md_table
-from analysis_agent.facts import profile_indicators, rank_text
+from analysis_agent.facts import rank_text
 from framing.cadrage import current
 from llm.agent import dispatch, journal_markdown, run_agent
 from paths import ANALYSIS_DIR, REVIEW_DIR
@@ -69,16 +69,13 @@ def run(max_turns: int = MAX_TURNS) -> str:
         # pour l'agent, qui se concentre sur la comparaison et le jugement.
         ws.report_read = True
         facts = {site: ws.site_facts(site) for site in sorted(ws.incidents["site"].unique())}
-        indicators = {a: rank_text(profile_indicators(ws.incidents[ws.incidents["asset_type"] == a]))
-                      for a in sorted(ws.incidents["asset_type"].unique())}
+        indicators = {a: rank_text(ws.indicators(a)) for a in sorted(ws.incidents["asset_type"].unique())}
         task = ("CONTRÔLES AUTOMATIQUES (faits par le code) :\n" + json.dumps(ws.checks, ensure_ascii=False)
                 + "\n\nRAPPORT À VÉRIFIER :\n" + ws.report_md
                 + "\n\nCHIFFRES RECALCULÉS PAR SITE (à comparer au rapport) :\n"
                 + json.dumps(facts, ensure_ascii=False, default=str)
                 + "\n\nCRITÈRES MESURÉS SUR CHAQUE SITE (rang parmi les sites du même segment, 1 = le plus "
                   "élevé) :\n" + json.dumps(indicators, ensure_ascii=False)
-                + ("\n\nPROFILS DU CONTEXTE :\n" + json.dumps({a: current().profiles(a) for a in current().profiled_segments},
-                                                               ensure_ascii=False) if current().profiled_segments else "")
                 + f"\n\nLe journal de l'agent d'analyse contient {len(ws.journal)} événements (read_journal). "
                   "Vérifie, consigne chaque problème avec record_finding, puis appelle conclude.")
         tools = [t for t in TOOLS if t["function"]["name"] != "read_report"]

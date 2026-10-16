@@ -3,9 +3,10 @@
 Pipeline agentique d'analyse de rapports d'incidents, qui produit un rapport d'actions pour le client.
 
 Les agents ne savent **rien du problème a priori** : ils n'en connaissent que quelques lignes écrites
-par l'utilisateur dans [`context/contexte.md`](context/contexte.md). Tout le reste (facteurs à
-l'origine des incidents, composants, catégories de conséquences, profils de site éventuels, mesures
-préventives types) est déduit de ce texte et des données à l'étape de **cadrage** ([`framing/`](framing/README.md)).
+par l'utilisateur dans [`context/contexte.md`](context/contexte.md). Le domaine, les libellés des segments
+et l'ordre des sévérités sont déduits de ce texte et des données à l'étape de **cadrage**
+([`framing/`](framing/README.md)). Les causes, composants et conséquences ne sont pas fixés à l'avance :
+l'analyse les **découvre** dans les données.
 
 ## Données
 
@@ -48,9 +49,8 @@ photovoltaïques et 3 parcs éoliens. Les 3 sites d'un même type sont exposés 
 semblables. [...]
 ```
 
-Pour que chaque site soit associé à un profil (plutôt que seulement caractérisé), décrire les profils
-dans ce même fichier (voir [`framing/README.md`](framing/README.md)). Après le cadrage, relire
-`outputs/1b_cadrage/cadrage.md` ; pour le corriger, copier `cadrage.json` en `context/cadrage.json`.
+Après le cadrage, relire `outputs/1b_cadrage/cadrage.md` ; pour le corriger, copier `cadrage.json` en
+`context/cadrage.json`.
 
 ## Lancer la pipeline
 
@@ -62,36 +62,48 @@ python main.py --steps webapp                 # tableau de bord Streamlit (à la
 python main.py --steps export                 # rapport interactif en un fichier HTML, à envoyer
 ```
 
+Le premier lancement complet refait tous les appels au LLM (le cache ne contient rien encore) : compter
+plusieurs dizaines de minutes et des appels Azure payants. Les relances ne refont que ce qui a changé.
+
+**Tester sans Azure** : `.venv/bin/python tests/e2e_mock.py` lance toute la pipeline (cadrage, analyse,
+vérification, export) sur des données synthétiques, avec le LLM et les embeddings simulés, dans un dossier
+temporaire supprimé à la fin. Il affiche `E2E OK` si tout passe.
+
 **Partager le rapport** : `outputs/2_analyse/rapport_interactif.html` est un fichier unique (~6 Mo, plotly.js
 intégré) qui s'ouvre d'un double-clic dans un navigateur, sans Python ni connexion. Mêmes graphiques
 interactifs que la webapp ; les filtres sont remplacés par des sections dépliables (une heatmap par site,
-toutes les fiches de causes, tous les plans par site).
+toutes les fiches de causes, les mesures par site, les causes isolées).
 
 ```
  1. pdf            PDF + CSV ──> incidents_full.csv (1800 incidents complets)
                                      │
- 1b. cadrage       context/contexte.md + échantillon des données ──> LLM ──> listes fermées, segments,
-                   profils éventuels, mesures types ; vérifiés par le code ──> cadrage.json (à relire)
+ 1b. cadrage       context/contexte.md + échantillon des données ──> LLM ──> domaine, libellés des
+                   segments, ordre des sévérités ; vérifiés par le code ──> cadrage.json (à relire)
                                      │
  2. analyse        AGENT D'ANALYSE (LLM Azure) qui appelle des outils Python bornés :
-                   extraction cause/conséquence (+ hypothèse « manque de maintenance »)
-                   ─> clustering + nommage/fusion des thèmes (par segment × causes/conséquences)
-                   ─> heatmap causes × conséquences ─> chaînes prioritaires ─> profils ou caractérisation
-                   ─> rédaction : faits Python, reformulés par le LLM, vérifiés par un validateur
-                   ─> fiches des causes (criticité Pareto) et plans par site
-                   ─> juge : relit chaque texte, corrections acceptées seulement si validées
+                   extraction par incident : cause racine + causes contributives (citations vérifiées
+                   par le code), conséquence, composant (normalisé par segment)
+                   ─> découverte des thèmes, par segment : clustering (UMAP + HDBSCAN) ; l'agent nomme
+                      et fusionne ; chaque phrase est affectée à un thème ou à « aucun » ; reprise du
+                      clustering sur les « aucun » (2 tours au plus)
+                   ─> arrêts nominaux : thèmes de conséquences de la sévérité la plus faible, vérifiés
+                   ─> caractérisation de chaque site : ce qui le distingue de ses voisins du même segment
+                   ─> plan d'actions : un couple site × cause, les plus coûteux jusqu'à 80 % du coût,
+                      12 mesures au plus, 5 incidents au moins ; une mesure par couple, rédigée puis vérifiée
+                   ─> fiches des causes (criticité Pareto), synthèse, juge
                                      │  rapport + journal de toutes ses décisions
  3. verification   contrôles automatiques + AGENT VÉRIFICATEUR (avis sur la cohérence) ─> verdict
+ export            le rapport en un seul fichier HTML (graphiques interactifs)
 ```
 
 | Étape | Module | Sortie |
 |---|---|---|
 | 1. `pdf` : extraction des PDF (digitaux + scans) | [`pdf_pipeline/`](pdf_pipeline/README.md) | `outputs/1_extraction/incidents_full.csv` |
 | 1b. `cadrage` : cadre d'analyse déduit du contexte et des données | [`framing/`](framing/README.md) | `outputs/1b_cadrage/cadrage.md` |
-| 2. `analyse` : workflow d'analyse (causes, conséquences, thèmes, profils, priorisation, rapport) | [`analysis_agent/`](analysis_agent/README.md) | `outputs/2_analyse/rapport_analyse.md` |
+| 2. `analyse` : workflow d'analyse (causes, thèmes, affectation, arrêts nominaux, sites, plan d'actions, rapport) | [`analysis_agent/`](analysis_agent/README.md) | `outputs/2_analyse/rapport_analyse.md` |
 | 3. `verification` : agent vérificateur | [`review_agent/`](review_agent/README.md) | `outputs/3_verification/verification.md` |
 | `export` : le même rapport en un fichier HTML autonome, à envoyer | [`webapp/export_html.py`](webapp/export_html.py) | `outputs/2_analyse/rapport_interactif.html` |
-| 4. `webapp` : **le rapport en version interactive** (synthèse exécutive, heatmap, Pareto et fiches diagnostic, sites et plans d'actions, explorateur + vérification) | [`webapp/app.py`](webapp/app.py) | Streamlit, lecture seule des sorties |
+| 4. `webapp` : **le rapport en version interactive** (synthèse et plan d'actions, heatmap, Pareto et fiches diagnostic, sites et mesures, causes isolées, explorateur + vérification) | [`webapp/app.py`](webapp/app.py) | Streamlit, lecture seule des sorties |
 
 Cette branche (`branch-octave-tom-merged`) réunit le workflow de Tom (extraction cause/conséquence,
 4 clusterings, agent aux outils bornés, rédaction validée, juge, vérificateur) et les idées de la

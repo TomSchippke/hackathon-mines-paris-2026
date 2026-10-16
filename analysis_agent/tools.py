@@ -766,7 +766,7 @@ class AnalysisWorkspace:
     def select_priority_chains(self, asset_type: str, chains: list[str], justification: str) -> dict:
         """Outil final de la phase priorités : les chaînes doivent être parmi les HOTSPOTS_MAX cases les
         plus coûteuses du type, et la justification ne citer que des chiffres de ces cases."""
-        from .writing import text_errors
+        from .writing import cause_names, concept_patterns, text_errors
 
         self.check_args(asset_type)
         self.require_themes(asset_type)
@@ -781,7 +781,8 @@ class AnalysisWorkspace:
         for c in chains:
             check_choice(c, list(allowed), "chaîne")
         facts = "\n".join(str(c) for c in top) + f"\n{len(table[table['asset_type'] == asset_type])} incidents"
-        errors = text_errors(justification, facts)
+        segment = table[table["asset_type"] == asset_type]
+        errors = text_errors(justification, facts, concept_patterns(cause_names(segment)))
         if errors:
             raise ToolError("justification refusée : " + " ; ".join(errors))
         self.priority_chains[asset_type] = {"chaines": [allowed[c] for c in chains], "justification": justification}

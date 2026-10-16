@@ -155,11 +155,12 @@ def fallback_merge(ws: AnalysisWorkspace, asset_type: str, dimension: str) -> li
     return merged
 
 
-def fallback_priorities(ws: AnalysisWorkspace, asset_type: str) -> None:
-    """L'agent n'a pas choisi : les chaînes les plus coûteuses de la heatmap."""
+def fallback_priorities(ws: AnalysisWorkspace, asset_type: str) -> dict:
+    """L'agent n'a pas choisi : les chaînes les plus coûteuses de la heatmap. Renvoie le résultat de l'outil
+    (un refus est consigné par l'appelant)."""
     top = ws.heatmap_hotspots(asset_type)["cases"][:PRIORITY_CHAINS_RANGE[0]]
-    dispatch(ws.tools, "select_priority_chains", {"asset_type": asset_type, "chains": [c["id"] for c in top],
-             "justification": "CHOIX AUTOMATIQUE par le code : les chaînes au plus fort coût total."})
+    return dispatch(ws.tools, "select_priority_chains", {"asset_type": asset_type, "chains": [c["id"] for c in top],
+                    "justification": "CHOIX AUTOMATIQUE par le code : les chaînes au plus fort coût total."})
 
 
 def themes_phase(ws: AnalysisWorkspace, journal: list, asset_type: str, dimension: str, turns: dict,
@@ -301,8 +302,10 @@ def run(max_turns: int | None = None) -> bool:
                                                  sites=", ".join(ws.sites[asset_type])),
                          ["heatmap_hotspots", "select_priority_chains"], {"asset_type": asset_type},
                          lambda a=asset_type: a in ws.priority_chains, turns["priorities"]):
-            fallback_priorities(ws, asset_type)
-            journal.append({"tour": 0, "type": "automatique", "texte": f"{asset_type} : chaînes prioritaires choisies par le code"})
+            result = fallback_priorities(ws, asset_type)
+            journal.append({"tour": 0, "type": "automatique", "texte": f"{asset_type} : chaînes prioritaires choisies par le code"
+                            if result.get("ok") else f"{asset_type} : AUCUNE chaîne prioritaire, choix du code refusé "
+                            f"({result.get('refus') or result.get('erreur')})"})
 
     # 3. Arrêts nominaux (agent, vérifié par le code dans flag_nominal).
     for asset_type in ws.segments:

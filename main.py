@@ -1,9 +1,9 @@
 """Pipeline complète, étape par étape :
 
   1. pdf           extraction des rapports PDF (digitaux + scans OCR)  -> outputs/1_extraction/
-  1b. cadrage      listes fermées, segments, profils éventuels, déduits de context/contexte.md
+  1b. cadrage      domaine, libellés des segments, ordre des sévérités, déduits de context/contexte.md
                    et d'un échantillon des données (LLM, vérifié par le code) -> outputs/1b_cadrage/
-  2. analyse       agent d'analyse : clustering, causes, thèmes, profils de site, rapport
+  2. analyse       agent d'analyse : causes découvertes, thèmes, sites, plan d'actions, rapport
                                                                        -> outputs/2_analyse/
   3. verification  contrôles du code + agent vérificateur (avis)      -> outputs/3_verification/
   4. webapp        tableau de bord Streamlit (lecture seule des sorties, à lancer à la demande)
