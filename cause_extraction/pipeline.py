@@ -8,7 +8,7 @@ action corrective. Les listes fermées permettent ensuite de compter et de compa
 L'agent d'analyse (analysis_agent) appelle analyse_incidents via son outil extract_causes ; le
 cache des réponses est partagé : ce qui a été analysé une fois ne l'est plus jamais.
 
-Le site n'est volontairement PAS donné au LLM : l'analyse d'un incident ne doit pas être
+Le site (ni les identifiants, qui le contiennent) n'est volontairement PAS donné au LLM : l'analyse d'un incident ne doit pas être
 influencée par ce qu'on sait (ou croit savoir) du site, sinon l'association site -> profil
 deviendrait circulaire.
 
@@ -38,22 +38,20 @@ from tqdm import tqdm
 from llm.client import chat
 from paths import CAUSES_DIR, INCIDENTS_CAUSES, INCIDENTS_FULL
 
-from .config import CAUSE_INCONNUE, QUOTE_MIN_MATCH, RESPONSE_FORMAT, SYSTEM_PROMPT, UNKNOWN_CAUSE_PATTERN, WORKERS
+from framing.cadrage import current
+from framing.config import SEGMENT_COLUMN, UNDETERMINED
 
-FIELDS = list(RESPONSE_FORMAT["json_schema"]["schema"]["properties"])
+from .config import (CAUSE_INCONNUE, FIELDS, PROMPT_EXCLUDED_COLUMNS, QUOTE_MIN_MATCH, UNKNOWN_CAUSE_PATTERN, WORKERS,
+                     response_format, system_prompt)
 
 
-def incident_prompt(row) -> str:
-    """Le rapport tel que le LLM le voit (sans le site, voir la docstring du module)."""
-    asset = {"solar": "centrale photovoltaïque", "wind": "parc éolien"}.get(row.asset_type, row.asset_type)
-    return (f"Type d'installation : {asset}\n"
-            f"Équipement : {row.equipment_id}\n"
-            f"Date : {row.date}\n"
-            f"Sévérité : {row.severity}\n"
-            f"Durée d'arrêt : {row.downtime_hours} h\n"
-            f"Coût estimé : {row.estimated_cost_eur} €\n"
-            f"Conditions météo : {row.weather_condition}\n"
-            f"Description : {row.text}")
+def incident_prompt(row: dict) -> str:
+    """Le rapport tel que le LLM le voit : toutes les colonnes sauf le site et les identifiants (voir la
+    docstring du module), puis la description."""
+    fields = [f"Segment : {current().label(row[SEGMENT_COLUMN])}"]
+    fields += [f"{col} : {value}" for col, value in row.items()
+               if col not in PROMPT_EXCLUDED_COLUMNS and col != SEGMENT_COLUMN and pd.notna(value)]
+    return "\n".join(fields + [f"Description : {row['text']}"])
 
 
 def simplify(text: str) -> str:
@@ -81,19 +79,19 @@ def normalize_cause(result: dict, text: str) -> dict:
     if not result["indice_verifie"]:
         if result["cause_type"] != "inconnue":
             result["cause_annulee"] = result["cause_racine"]  # gardée pour transparence
-        result.update(cause_racine=CAUSE_INCONNUE, cause_type="inconnue", facteur_principal="indéterminé")
+        result.update(cause_racine=CAUSE_INCONNUE, cause_type="inconnue", facteur_principal=UNDETERMINED)
     return result
 
 
-def analyse(row) -> dict:
+def analyse(row: dict, prompt: str, schema: dict) -> dict:
     """Analyse d'un incident ; en cas d'échec, les champs sont vides et l'erreur est notée."""
     try:
-        answer = chat([{"role": "system", "content": SYSTEM_PROMPT},
+        answer = chat([{"role": "system", "content": prompt},
                        {"role": "user", "content": incident_prompt(row)}],
-                      role="extraction", response_format=RESPONSE_FORMAT)
+                      role="extraction", response_format=schema)
         result = json.loads(answer["content"])
         result["facteurs_secondaires"] = " | ".join(result["facteurs_secondaires"])
-        return {**normalize_cause(result, row.text), "erreur_analyse": ""}
+        return {**normalize_cause(result, row["text"]), "erreur_analyse": ""}
     except Exception as e:  # filtre de contenu Azure, réponse invalide... : signalé, n'arrête rien
         return {**{f: None for f in FIELDS}, "erreur_analyse": f"{type(e).__name__}: {e}"[:300]}
 
@@ -101,9 +99,11 @@ def analyse(row) -> dict:
 def analyse_incidents(df: pd.DataFrame, workers: int = WORKERS) -> pd.DataFrame:
     """Analyse de chaque ligne de `df` (appels en parallèle, réponses en cache). Une ligne de
     résultat par incident, dans le même ordre et avec le même index que `df`."""
-    rows = list(df.itertuples())
+    rows = df.to_dict(orient="records")
+    prompt, schema = system_prompt(), response_format()  # listes fermées du cadrage
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        results = list(tqdm(pool.map(analyse, rows), total=len(rows), desc="Analyse des causes"))
+        results = list(tqdm(pool.map(lambda r: analyse(r, prompt, schema), rows), total=len(rows),
+                            desc="Analyse des causes"))
     return pd.DataFrame(results, index=df.index)
 
 
@@ -144,7 +144,7 @@ def run(input_csv: Path, workers: int) -> Path:
     if len(ok) < len(out):
         print(f"{len(out) - len(ok)} incidents non analysés (colonne erreur_analyse)")
     print("\nFacteurs dominants par site :")
-    factors = percent_by_site(ok, "facteur_principal").drop(index="indéterminé", errors="ignore")
+    factors = percent_by_site(ok, "facteur_principal").drop(index=UNDETERMINED, errors="ignore")
     for site in factors.columns:
         top = factors[site].sort_values(ascending=False).head(3)
         print(f"  {site:22s} " + ", ".join(f"{f} {p:.0f} %" for f, p in top.items()))

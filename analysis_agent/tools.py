@@ -5,12 +5,12 @@ Chaque outil est une méthode de AnalysisWorkspace :
   - il vérifie que les étapes préalables ont été faites (pas de clustering sans causes extraites...) ;
   - tous les chiffres qu'il renvoie sont calculés par le code, jamais par le LLM.
 
-Deux clusterings par type d'installation, sur les phrases extraites par le LLM : les CAUSES
+Deux clusterings par segment (colonne asset_type, libellés au cadrage), sur les phrases extraites par le LLM : les CAUSES
 (pourquoi) et les CONSÉQUENCES (ce que l'incident a provoqué). Les causes inconnues (« cause non
 précisée ») sont exclues du clustering des causes et comptées à part.
 
 Outils, dans l'ordre d'utilisation :
-    overview                 vue d'ensemble des données et profils de site
+    overview                 vue d'ensemble des données et profils de site (s'il y en a au cadrage)
     extract_causes           cause et conséquence de chaque incident, par le LLM (cache partagé)
     run_clustering           un essai de clustering (UMAP + HDBSCAN) sur les causes ou les conséquences
     select_clustering        choix d'un essai, refusé s'il ne respecte pas les seuils de qualité
@@ -20,7 +20,7 @@ Outils, dans l'ordre d'utilisation :
     heatmap_hotspots         cases les plus coûteuses de la heatmap causes x conséquences
     select_priority_chains   chaînes cause -> conséquence prioritaires (outil final de la phase priorités)
     site_evidence            points distinctifs et statistiques de chaque site
-    assign_profiles          associe chaque site à un profil A, B, C (outil final de la phase profils)
+    assign_profiles          associe chaque site à un profil du contexte (outil final de la phase profils)
 """
 
 from __future__ import annotations
@@ -30,19 +30,26 @@ import re
 import numpy as np
 import pandas as pd
 
+from framing.cadrage import current
 from llm.agent import ToolError
 from paths import CACHE_DIR
 from topic_modeling.config import FRENCH_STOPWORDS, NGRAM_RANGE, UMAP_PARAMS
 
 from . import facts as F
-from .config import (CONSEQUENCE_WORDS, HOTSPOTS_MAX, MERGE_SIMILARITY, PRIORITY_CHAINS_RANGE, MIN_CHOSEN_DBCV, ASSET_TYPES, DIMENSIONS, EXAMPLE_MAX_CHARS, EXTRA_STOPWORDS, MAX_CLUSTERING_RUNS,
-                     MAX_THEME_NAME_CHARS, MAX_THEMES_PER_CALL, MAX_TOPICS_PER_CALL, MAX_UNCLASSIFIED_PCT,
-                     MERGE_MIN_COHESION_RATIO, MIN_CLUSTER_SIZE_RANGE, MIN_STABILITY, N_DESCRIPTIONS,
-                     N_EXAMPLES, N_TOPICS_RANGE, NEUTRAL_FACTORS, SITE_PROFILES, STABILITY_SEEDS)
+from .config import (CONSEQUENCE_WORDS, DIMENSIONS, EXAMPLE_MAX_CHARS, EXTRA_STOPWORDS, GENERIC_MIN_DF, HOTSPOTS_MAX,
+                     MAX_CLUSTERING_RUNS, MAX_THEME_NAME_CHARS, MAX_THEMES_PER_CALL, MAX_TOPICS_PER_CALL,
+                     MAX_UNCLASSIFIED_PCT, MERGE_MIN_COHESION_RATIO, MERGE_SIMILARITY, MIN_CHOSEN_DBCV,
+                     MIN_CLUSTER_SIZE_RANGE, MIN_STABILITY, N_DESCRIPTIONS, N_EXAMPLES, N_TOPICS_RANGE,
+                     NEUTRAL_FACTORS, PRIORITY_CHAINS_RANGE, STABILITY_SEEDS, UNDETERMINED)
 
 SEASONS = {12: "hiver", 1: "hiver", 2: "hiver", 3: "printemps", 4: "printemps", 5: "printemps",
            6: "été", 7: "été", 8: "été", 9: "automne", 10: "automne", 11: "automne"}
 OTHER = {"cause": "consequence", "consequence": "cause"}
+# Colonnes catégorielles décrites dans le détail d'un cluster (par exemple les conditions du jour) :
+# toutes celles de 2 à CONTEXT_MAX_VALUES valeurs, sauf celles-ci, déjà décrites autrement.
+CONTEXT_EXCLUDED = {"site", "asset_type", "severity", "document_format", "extraction_method", "saison"}
+CONTEXT_MAX_VALUES = 12
+WORD = re.compile(r"(?u)\b[^\W\d_][^\W\d_]+\b")
 
 
 # ------------------------------------------------------------------------------------------------
@@ -55,11 +62,11 @@ def percent(series: pd.Series, top: int | None = None) -> dict[str, float]:
     return (shares.head(top) if top else shares).to_dict()
 
 
-def keywords_by_cluster(texts: list[str], labels: np.ndarray, n: int = 8) -> dict[int, list[str]]:
+def keywords_by_cluster(texts: list[str], labels: np.ndarray, stopwords: list[str], n: int = 8) -> dict[int, list[str]]:
     """Mots-clés de chaque cluster (c-TF-IDF, comme BERTopic) : fréquents dans le cluster, rares ailleurs."""
     from sklearn.feature_extraction.text import CountVectorizer
 
-    vectorizer = CountVectorizer(stop_words=FRENCH_STOPWORDS + EXTRA_STOPWORDS, ngram_range=NGRAM_RANGE,
+    vectorizer = CountVectorizer(stop_words=FRENCH_STOPWORDS + stopwords, ngram_range=NGRAM_RANGE,
                                  token_pattern=r"(?u)\b[^\W\d_][^\W\d_]+\b")
     counts = vectorizer.fit_transform(texts)
     clusters = sorted(set(labels))
@@ -70,14 +77,25 @@ def keywords_by_cluster(texts: list[str], labels: np.ndarray, n: int = 8) -> dic
     return {c: [vocab[i] for i in scores[k].argsort()[::-1][:n]] for k, c in enumerate(clusters)}
 
 
-GENERIC = re.compile(r"\b(?:" + "|".join(map(re.escape, EXTRA_STOPWORDS)) + r")\b", re.IGNORECASE)
+def generic_words(df: pd.DataFrame, segments: dict[str, str]) -> list[str]:
+    """Mots qui ne distinguent aucune cause : présents dans au moins GENERIC_MIN_DF des descriptions
+    d'un segment (nom de l'installation...), et mots des libellés de segment. Trouvés dans les données."""
+    words = set(EXTRA_STOPWORDS)
+    for segment, label in segments.items():
+        texts = df.loc[df["asset_type"] == segment, "text"].dropna().astype(str).str.lower()
+        if len(texts):
+            df_counts = pd.Series([w for t in texts for w in set(WORD.findall(t))]).value_counts()
+            words |= set(df_counts[df_counts >= GENERIC_MIN_DF * len(texts)].index)
+        words |= {w for w in WORD.findall(label.lower()) if len(w) >= 4} | {w + "s" for w in WORD.findall(label.lower())
+                                                                             if len(w) >= 4}
+    return sorted(words - set(FRENCH_STOPWORDS))
 
 
-def normalize_phrase(text: str) -> str:
+def normalize_phrase(text: str, generic: re.Pattern) -> str:
     """Phrase utilisée pour le clustering : sans les nombres et leurs unités (« arrêt de 3.2 heures »)
-    ni les mots génériques (« éolienne », « pendant »), qui sinon forment de faux clusters."""
+    ni les mots génériques (generic_words), qui sinon forment de faux clusters."""
     text = re.sub(r"\d+(?:[.,]\d+)?\s*(?:heures?|h\b|€|euros?|%|jours?|minutes?|min\b)?", " ", str(text))
-    text = GENERIC.sub(" ", text)
+    text = generic.sub(" ", text)
     return re.sub(r"\s+", " ", text).strip(" ,.;:-") or "?"
 
 
@@ -137,7 +155,13 @@ class AnalysisWorkspace:
     def __init__(self, incidents: pd.DataFrame):
         self.df = incidents.reset_index(drop=True).copy()
         self.df["saison"] = pd.to_datetime(self.df["date"], errors="coerce").dt.month.map(SEASONS)
-        self.sites = {a: sorted(self.df.loc[self.df["asset_type"] == a, "site"].unique()) for a in ASSET_TYPES}
+        self.cadrage = current()
+        self.segments = self.cadrage.segments
+        self.sites = {a: sorted(self.df.loc[self.df["asset_type"] == a, "site"].unique()) for a in self.segments}
+        self.stopwords = generic_words(self.df, {a: self.cadrage.label(a) for a in self.segments})
+        self.generic = re.compile(r"\b(?:" + "|".join(map(re.escape, self.stopwords)) + r")\b", re.IGNORECASE)
+        self.context_columns = [c for c in self.df.columns if c not in CONTEXT_EXCLUDED and self.df[c].dtype == object
+                                and 2 <= self.df[c].nunique() <= CONTEXT_MAX_VALUES]
         self.causes = pd.DataFrame()            # analyses du LLM, index = position dans self.df
         self.vectors: dict[str, tuple[np.ndarray, np.ndarray]] = {}  # "type/dim" -> (positions, embeddings)
         self.reduced: dict[str, dict[int, np.ndarray]] = {}  # "type/dim" -> UMAP par graine (calculé une fois)
@@ -167,7 +191,7 @@ class AnalysisWorkspace:
         return f"{asset_type}/{dimension}"
 
     def check_args(self, asset_type: str, dimension: str | None = None) -> None:
-        check_choice(asset_type, ASSET_TYPES, "asset_type")
+        check_choice(asset_type, self.segments, "asset_type")
         if dimension is not None:
             check_choice(dimension, list(DIMENSIONS), "dimension")
 
@@ -190,7 +214,7 @@ class AnalysisWorkspace:
             phrases = phrases[phrases.notna() & (phrases.astype(str).str.strip() != "")]
             if dimension == "cause":  # causes inconnues ou incertaines : exclues du clustering, comptées à part
                 phrases = phrases[~self.uncertain_or_unknown(phrases.index)]
-            emb = embed_texts([normalize_phrase(p) for p in phrases], CACHE_DIR)
+            emb = embed_texts([normalize_phrase(p, self.generic) for p in phrases], CACHE_DIR)
             emb = emb / np.maximum(np.linalg.norm(emb, axis=1, keepdims=True), 1e-12)
             self.vectors[k] = (phrases.index.to_numpy(), emb)
         return self.vectors[k]
@@ -234,7 +258,7 @@ class AnalysisWorkspace:
         for d in DIMENSIONS:
             out[f"cluster_{d}"] = pd.Series(dtype="Int64")
             out[f"theme_{d}_id"] = None
-            for asset_type in ASSET_TYPES:
+            for asset_type in self.segments:
                 k = self.key(asset_type, d)
                 if k not in self.selected:
                     continue
@@ -257,7 +281,8 @@ class AnalysisWorkspace:
                  .round(1).reset_index().to_dict(orient="records"))
         return {"incidents": len(self.df), "periode": [self.df["date"].min(), self.df["date"].max()],
                 "sites": sites, "severite_pct": percent(self.df["severity"]),
-                "profils_de_site": SITE_PROFILES,
+                "segments": {a: self.cadrage.label(a) for a in self.segments},
+                "profils_de_site": {a: self.cadrage.profiles(a) for a in self.cadrage.profiled_segments},
                 "bornes": {"min_cluster_size": MIN_CLUSTER_SIZE_RANGE,
                            "essais_par_type_et_dimension": MAX_CLUSTERING_RUNS},
                 "seuils_qualite": {"stabilite_min": MIN_STABILITY, "non_classes_max_pct": MAX_UNCLASSIFIED_PCT,
@@ -306,8 +331,8 @@ class AnalysisWorkspace:
         labels = main.labels_
         stability = float(np.mean([adjusted_rand_score(labels, fits[s].labels_) for s in STABILITY_SEEDS[1:]]))
         sizes = pd.Series(labels[labels != -1]).value_counts()
-        phrases = [normalize_phrase(p) for p in self.causes.loc[positions, DIMENSIONS[dimension]]]
-        keywords = keywords_by_cluster(phrases, labels)
+        phrases = [normalize_phrase(p, self.generic) for p in self.causes.loc[positions, DIMENSIONS[dimension]]]
+        keywords = keywords_by_cluster(phrases, labels, self.stopwords)
 
         n_topics = len(sizes)
         unclassified = round(100 * float((labels == -1).mean()), 1)
@@ -375,7 +400,8 @@ class AnalysisWorkspace:
                 f"{DIMENSIONS[other]}_exemples": typical[DIMENSIONS[other]].head(2).tolist(),
                 "description_exemple": [x[:EXAMPLE_MAX_CHARS] for x in typical["text"].head(N_DESCRIPTIONS)],
                 "sites_pct": percent(sub["site"]), "severite_pct": percent(sub["severity"]),
-                "saisons_pct": percent(sub["saison"], top=2), "meteo_pct": percent(sub["weather_condition"], top=3),
+                "saisons_pct": percent(sub["saison"], top=2),
+                **{f"{c}_pct": percent(sub[c], top=3) for c in self.context_columns},
                 "facteurs_pct": percent(sub["facteur_principal"], top=4),
                 "cout_moyen_eur": round(float(sub["estimated_cost_eur"].mean())),
             }
@@ -405,7 +431,7 @@ class AnalysisWorkspace:
                     raise ToolError(f"nom refusé : « {name} » décrit une conséquence (arrêt, perte, dégât, feu...). Un "
                                     "thème de cause ne nomme que ce qui a PROVOQUÉ l'incident"
                                     + (f" : facteur dominant de ces clusters = « {hint} », par exemple « {hint.capitalize()} »."
-                                       if hint else " (ex. « Vent fort / tempête »)."))
+                                       if hint else "."))
                 description = str(theme.get("description") or "").strip()[:600]
                 justification = str(theme.get("justification") or "").strip()[:1500]
                 topics = list(dict.fromkeys(check_list(theme.get("topics"), 40, "topics")))
@@ -468,7 +494,7 @@ class AnalysisWorkspace:
         positions, _ = self.phrase_vectors(asset_type, dimension)
         column = "facteur_principal" if dimension == "cause" else "categorie_consequence"
         values = self.causes.loc[positions[mask], column].dropna()
-        values = values[values != "indéterminé"]
+        values = values[values != UNDETERMINED]
         return values.mode().iat[0] if len(values) else ""
 
     def centroid(self, asset_type: str, dimension: str, mask: np.ndarray) -> np.ndarray:
@@ -595,24 +621,28 @@ class AnalysisWorkspace:
                                                       for c in F.dominant_causes(g)],
                 "cause_non_precisee_pct": F.unknown_share(g),
             }
-        return {"asset_type": asset_type, "profils_possibles": SITE_PROFILES[asset_type],
-                "criteres_par_site": F.rank_text(indicators), "sites": sites,
-                "compatibilite_profils": F.profile_compatibility(indicators, asset_type),
-                "meilleures_attributions": F.best_assignments(indicators, asset_type)}
+        out = {"asset_type": asset_type, "criteres_par_site": F.rank_text(indicators), "sites": sites}
+        if self.cadrage.profiles(asset_type):
+            out.update(profils_possibles=self.cadrage.profiles(asset_type),
+                       compatibilite_profils=F.profile_compatibility(indicators, asset_type),
+                       meilleures_attributions=F.best_assignments(indicators, asset_type))
+        return out
 
     def assign_profiles(self, assignments: list[dict], raisonnement: str) -> dict:
-        """Outil final de la phase profils : un profil A, B, C par site, chacun une fois par type."""
+        """Outil final de la phase profils : un profil du contexte par site, chacun une fois par segment
+        (seulement les segments dont le contexte décrit des profils)."""
         raisonnement = check_text(raisonnement, "raisonnement", 4000)
-        expected = {s: a for a in ASSET_TYPES for s in self.sites[a]}
+        profiled = self.cadrage.profiled_segments
+        expected = {s: a for a in profiled for s in self.sites[a]}
         if not isinstance(assignments, list) or not all(isinstance(x, dict) for x in assignments) \
                 or sorted(x.get("site", "") for x in assignments) != sorted(expected):
             raise ToolError(f"il faut exactement une entrée par site : {sorted(expected)}")
         table = self.incidents_table()
-        for asset_type in ASSET_TYPES:
+        for asset_type in profiled:
             profiles = sorted(str(x.get("profil")) for x in assignments if expected[x["site"]] == asset_type)
-            if profiles != sorted(SITE_PROFILES[asset_type]):
-                raise ToolError(f"{asset_type} : chaque profil A, B, C doit être attribué à exactement un site "
-                                f"(reçu : {profiles})")
+            if profiles != sorted(self.cadrage.profiles(asset_type)):
+                raise ToolError(f"{asset_type} : chaque profil {sorted(self.cadrage.profiles(asset_type))} doit être "
+                                f"attribué à exactement un site (reçu : {profiles})")
             indicators = F.profile_indicators(table[table["asset_type"] == asset_type])
             chosen = {x["site"]: x["profil"] for x in assignments if expected[x["site"]] == asset_type}
             best = F.best_assignments(indicators, asset_type)
@@ -624,7 +654,6 @@ class AnalysisWorkspace:
         return {"message": "profils enregistrés"}
 
 
-ASSET = {"type": "string", "enum": ASSET_TYPES}
 DIMENSION = {"type": "string", "enum": list(DIMENSIONS), "description": "cause (pourquoi) ou consequence (ce que "
                                                                         "l'incident a provoqué)"}
 
@@ -636,61 +665,67 @@ def tool(name: str, description: str, properties: dict, required: list[str] | No
                        "additionalProperties": False}}}
 
 
-TOOLS = [
-    tool("overview", "Vue d'ensemble : incidents par site, sévérité, profils de site du sujet, bornes et seuils.", {}),
-    tool("extract_causes", "Fait extraire par le LLM la cause (pourquoi) et la conséquence (ce qui a été provoqué) "
-                           "de chaque incident du type, avec facteur principal, usure, maintenance, action corrective.",
-         {"asset_type": ASSET}),
-    tool("run_clustering", "Un essai de clustering (UMAP + HDBSCAN) des causes ou des conséquences extraites. Renvoie "
-                           "les scores (stabilité, non classés, DBCV, nombre de clusters) et les clusters avec mots-clés.",
-         {"asset_type": ASSET, "dimension": DIMENSION,
-          "min_cluster_size": {"type": "integer", "minimum": MIN_CLUSTER_SIZE_RANGE[0],
-                               "maximum": MIN_CLUSTER_SIZE_RANGE[1],
-                               "description": "taille minimale d'un cluster ; petit = clusters nombreux et fins"}}),
-    tool("select_clustering", "Choisit l'essai de clustering à utiliser pour ce type et cette dimension.",
-         {"asset_type": ASSET, "dimension": DIMENSION, "run_id": {"type": "string"}, "justification": {"type": "string"}}),
-    tool("topic_details", f"Détail de 1 à {MAX_TOPICS_PER_CALL} clusters du clustering choisi : phrases typiques, "
-                          "sites, sévérité, saisons, météo, facteurs, coût, cohésion (1 = phrases identiques).",
-         {"asset_type": ASSET, "dimension": DIMENSION,
-          "topics": {"type": "array", "items": {"type": "integer"}, "maxItems": MAX_TOPICS_PER_CALL}}),
-    tool("define_themes", f"Range des clusters dans 1 à {MAX_THEMES_PER_CALL} thèmes nommés (un thème peut fusionner "
-                          "plusieurs clusters ; fusion refusée si les phrases réunies sont trop différentes).",
-         {"asset_type": ASSET, "dimension": DIMENSION,
-          "themes": {"type": "array", "maxItems": MAX_THEMES_PER_CALL, "items": {
-              "type": "object", "additionalProperties": False,
-              "required": ["name", "topics"],
-              "properties": {"name": {"type": "string", "description": f"{MAX_THEME_NAME_CHARS} caractères maximum"},
-                             "topics": {"type": "array", "items": {"type": "integer"}},
-                             "description": {"type": "string", "description": "1 à 2 phrases"},
-                             "justification": {"type": "string"}}}}}),
-    tool("define_theme", "Crée UN thème nommé à partir d'un ou plusieurs clusters (plusieurs = fusion). Appelle-le une "
-                         "fois par thème ; plusieurs appels par tour sont possibles.",
-         {"asset_type": ASSET, "dimension": DIMENSION,
-          "name": {"type": "string", "description": f"{MAX_THEME_NAME_CHARS} caractères maximum"},
-          "topics": {"type": "array", "items": {"type": "integer"}},
-          "description": {"type": "string", "description": "facultatif, 1 phrase"}}, required=["asset_type", "dimension", "name", "topics"]),
-    tool("compare_clusters", "Les clusters a et b décrivent-ils la même chose ? Renvoie la similarité de leurs centres, "
-                             "leur facteur (ou catégorie) dominant, des exemples et un avis de fusion.",
-         {"asset_type": ASSET, "dimension": DIMENSION, "a": {"type": "integer"}, "b": {"type": "integer"}}),
-    tool("merge_themes", "Fusionne plusieurs thèmes déjà créés en un seul (pour supprimer un doublon).",
-         {"asset_type": ASSET, "dimension": DIMENSION, "theme_ids": {"type": "array", "items": {"type": "string"}},
-          "name": {"type": "string"}}),
-    tool("remove_theme", "Supprime un thème pour libérer ses clusters.", {"theme_id": {"type": "string"}}),
-    tool("heatmap_hotspots", f"Cases les plus coûteuses de la heatmap thèmes de causes connues x thèmes de conséquences "
-                             f"(1 à {HOTSPOTS_MAX}) : id, cause, conséquence, incidents, coût total et moyen, arrêt, part "
-                             "du coût, part de maintenance suspectée. Sur tout le type, ou sur un site.",
-         {"asset_type": ASSET, "site": {"type": ["string", "null"], "description": "un site du type, ou null pour tous"},
-          "top_k": {"type": "integer", "minimum": 1, "maximum": HOTSPOTS_MAX}}, required=["asset_type"]),
-    tool("select_priority_chains", f"Outil final : choisit {PRIORITY_CHAINS_RANGE[0]} à {PRIORITY_CHAINS_RANGE[1]} chaînes "
-                                   "cause -> conséquence prioritaires (id de heatmap_hotspots sans site).",
-         {"asset_type": ASSET, "chains": {"type": "array", "items": {"type": "string"}, "maxItems": PRIORITY_CHAINS_RANGE[1]},
-          "justification": {"type": "string", "description": "pourquoi ces chaînes, avec les chiffres de l'outil"}}),
-    tool("site_evidence", "Pour chaque site : points distinctifs (critères où il se distingue nettement des autres "
-                          "sites), causes connues les plus fréquentes, part de causes non précisées ; et les critères "
-                          "des profils mesurés sur chaque site.", {"asset_type": ASSET}),
-    tool("assign_profiles", "Outil final : associe chaque site à un profil A, B ou C (chaque profil une fois par type).",
-         {"assignments": {"type": "array", "items": {
-             "type": "object", "additionalProperties": False, "required": ["site", "profil"],
-             "properties": {"site": {"type": "string"}, "profil": {"type": "string", "enum": ["A", "B", "C"]}}}},
-          "raisonnement": {"type": "string", "description": "pourquoi chaque site correspond à son profil"}}),
-]
+def tool_schemas() -> list[dict]:
+    """Schémas des outils : les segments et les profils possibles viennent du cadrage."""
+    c = current()
+    ASSET = {"type": "string", "enum": c.segments, "description": "segment : " + ", ".join(
+        f"{a} ({c.label(a)})" for a in c.segments)}
+    PROFILES = sorted({p for a in c.profiled_segments for p in c.profiles(a)}) or ["aucun"]
+    return [
+        tool("overview", "Vue d'ensemble : incidents par site, sévérité, segments, profils de site du contexte, bornes et seuils.", {}),
+        tool("extract_causes", "Fait extraire par le LLM la cause (pourquoi) et la conséquence (ce qui a été provoqué) "
+                               "de chaque incident du segment, avec facteur principal, usure, maintenance, action corrective.",
+             {"asset_type": ASSET}),
+        tool("run_clustering", "Un essai de clustering (UMAP + HDBSCAN) des causes ou des conséquences extraites. Renvoie "
+                               "les scores (stabilité, non classés, DBCV, nombre de clusters) et les clusters avec mots-clés.",
+             {"asset_type": ASSET, "dimension": DIMENSION,
+              "min_cluster_size": {"type": "integer", "minimum": MIN_CLUSTER_SIZE_RANGE[0],
+                                   "maximum": MIN_CLUSTER_SIZE_RANGE[1],
+                                   "description": "taille minimale d'un cluster ; petit = clusters nombreux et fins"}}),
+        tool("select_clustering", "Choisit l'essai de clustering à utiliser pour ce type et cette dimension.",
+             {"asset_type": ASSET, "dimension": DIMENSION, "run_id": {"type": "string"}, "justification": {"type": "string"}}),
+        tool("topic_details", f"Détail de 1 à {MAX_TOPICS_PER_CALL} clusters du clustering choisi : phrases typiques, "
+                              "sites, sévérité, saisons, météo, facteurs, coût, cohésion (1 = phrases identiques).",
+             {"asset_type": ASSET, "dimension": DIMENSION,
+              "topics": {"type": "array", "items": {"type": "integer"}, "maxItems": MAX_TOPICS_PER_CALL}}),
+        tool("define_themes", f"Range des clusters dans 1 à {MAX_THEMES_PER_CALL} thèmes nommés (un thème peut fusionner "
+                              "plusieurs clusters ; fusion refusée si les phrases réunies sont trop différentes).",
+             {"asset_type": ASSET, "dimension": DIMENSION,
+              "themes": {"type": "array", "maxItems": MAX_THEMES_PER_CALL, "items": {
+                  "type": "object", "additionalProperties": False,
+                  "required": ["name", "topics"],
+                  "properties": {"name": {"type": "string", "description": f"{MAX_THEME_NAME_CHARS} caractères maximum"},
+                                 "topics": {"type": "array", "items": {"type": "integer"}},
+                                 "description": {"type": "string", "description": "1 à 2 phrases"},
+                                 "justification": {"type": "string"}}}}}),
+        tool("define_theme", "Crée UN thème nommé à partir d'un ou plusieurs clusters (plusieurs = fusion). Appelle-le une "
+                             "fois par thème ; plusieurs appels par tour sont possibles.",
+             {"asset_type": ASSET, "dimension": DIMENSION,
+              "name": {"type": "string", "description": f"{MAX_THEME_NAME_CHARS} caractères maximum"},
+              "topics": {"type": "array", "items": {"type": "integer"}},
+              "description": {"type": "string", "description": "facultatif, 1 phrase"}}, required=["asset_type", "dimension", "name", "topics"]),
+        tool("compare_clusters", "Les clusters a et b décrivent-ils la même chose ? Renvoie la similarité de leurs centres, "
+                                 "leur facteur (ou catégorie) dominant, des exemples et un avis de fusion.",
+             {"asset_type": ASSET, "dimension": DIMENSION, "a": {"type": "integer"}, "b": {"type": "integer"}}),
+        tool("merge_themes", "Fusionne plusieurs thèmes déjà créés en un seul (pour supprimer un doublon).",
+             {"asset_type": ASSET, "dimension": DIMENSION, "theme_ids": {"type": "array", "items": {"type": "string"}},
+              "name": {"type": "string"}}),
+        tool("remove_theme", "Supprime un thème pour libérer ses clusters.", {"theme_id": {"type": "string"}}),
+        tool("heatmap_hotspots", f"Cases les plus coûteuses de la heatmap thèmes de causes connues x thèmes de conséquences "
+                                 f"(1 à {HOTSPOTS_MAX}) : id, cause, conséquence, incidents, coût total et moyen, arrêt, part "
+                                 "du coût, part de maintenance suspectée. Sur tout le type, ou sur un site.",
+             {"asset_type": ASSET, "site": {"type": ["string", "null"], "description": "un site du type, ou null pour tous"},
+              "top_k": {"type": "integer", "minimum": 1, "maximum": HOTSPOTS_MAX}}, required=["asset_type"]),
+        tool("select_priority_chains", f"Outil final : choisit {PRIORITY_CHAINS_RANGE[0]} à {PRIORITY_CHAINS_RANGE[1]} chaînes "
+                                       "cause -> conséquence prioritaires (id de heatmap_hotspots sans site).",
+             {"asset_type": ASSET, "chains": {"type": "array", "items": {"type": "string"}, "maxItems": PRIORITY_CHAINS_RANGE[1]},
+              "justification": {"type": "string", "description": "pourquoi ces chaînes, avec les chiffres de l'outil"}}),
+        tool("site_evidence", "Pour chaque site : points distinctifs (critères où il se distingue nettement des autres "
+                              "sites), causes connues les plus fréquentes, part de causes non précisées ; et les critères "
+                              "des profils mesurés sur chaque site.", {"asset_type": ASSET}),
+        tool("assign_profiles", "Outil final : associe chaque site à un profil du contexte (chaque profil une fois par segment).",
+             {"assignments": {"type": "array", "items": {
+                 "type": "object", "additionalProperties": False, "required": ["site", "profil"],
+                 "properties": {"site": {"type": "string"}, "profil": {"type": "string", "enum": PROFILES}}}},
+              "raisonnement": {"type": "string", "description": "pourquoi chaque site correspond à son profil"}}),
+    ]

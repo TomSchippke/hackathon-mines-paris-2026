@@ -18,7 +18,7 @@ python main.py --steps verification  # ou : python -m review_agent
 | budget et qualité des clusterings choisis | plus de 5 essais ; stabilité < 0.8, non classés > 15 %, clusters hors 3–40 |
 | chaque cluster dans un thème | un incident classé n'a pas de thème |
 | causes et conséquences extraites | moins de 95 % des incidents analysés |
-| profils A, B, C | un profil absent ou attribué deux fois ; attribution qui respecte moins d'attentes des profils que la meilleure possible |
+| profils (si le contexte en décrit) | un profil absent ou attribué deux fois ; attribution qui respecte moins d'attentes des profils que la meilleure possible |
 | plans : mesures préventives avec mécanisme | une mesure est une réparation ponctuelle, vague, ou sans mécanisme lié à sa cause |
 | noms des thèmes de causes | un nom de cause contient une conséquence (« arrêt », « perte »...) |
 | (information) | causes non précisées, reprises automatiques par le code, refus d'outils |
@@ -27,7 +27,7 @@ Les problèmes trouvés par ces contrôles deviennent des **constats ciblés** (
 une consigne de correction.
 
 **2. Relecture par un agent LLM, exigeant par consigne.** Il reçoit le rapport, les chiffres
-recalculés de chaque site et les critères des profils, et doit consigner au moins un point pour
+recalculés de chaque site et les critères mesurés sur chaque site, et doit consigner au moins un point pour
 **chaque site et pour la synthèse** (sinon `conclude` est refusé).
 
 | Outil | Ce qu'il fait |

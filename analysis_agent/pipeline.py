@@ -1,16 +1,18 @@
 """Étape 2 : agent d'analyse, en phases.
 
 Le CODE fixe l'ordre des phases ; dans chaque phase, l'AGENT LLM (Azure OpenAI, modèle du .env)
-prend les décisions avec 2 ou 3 outils bornés (voir tools.py) :
+prend les décisions avec 2 ou 3 outils bornés (voir tools.py). Ce que l'agent sait du problème vient
+uniquement du cadrage (étape 1b, framing/ : contexte écrit par l'utilisateur + données) :
 
     0. code     extraction de la cause et de la conséquence de chaque incident (LLM, en cache)
-    1. agent    pour chaque type (solar, wind) et chaque dimension (cause, consequence) :
+    1. agent    pour chaque segment (cadrage) et chaque dimension (cause, consequence) :
                   a. clustering : essaie des réglages (run_clustering), en choisit un (select_clustering)
                   b. thèmes     : lit les clusters (topic_details), les nomme / regroupe (define_themes)
     2. agent    priorités : lit la heatmap thèmes de causes x thèmes de conséquences (heatmap_hotspots)
                 et choisit les chaînes cause -> conséquence prioritaires (select_priority_chains)
-    3. agent    profils : lit les points distinctifs de chaque site (site_evidence) et associe chaque
-                site à un profil A, B, C (assign_profiles)
+    3. agent    profils, seulement si le contexte en décrit : lit les points distinctifs de chaque site
+                (site_evidence) et associe chaque site à un profil (assign_profiles). Sans profils, chaque
+                site est caractérisé par ce qui le distingue des autres sites de son segment.
     4. code+LLM rédaction : les faits sont calculés en Python (facts.py) ; le LLM ne fait que les
                 reformuler et un validateur vérifie chaque chiffre et chaque phénomène cité (writing.py) ;
                 plans par site, fiche de chaque cause (criticité Pareto), synthèse ; puis relecture par le juge
@@ -43,13 +45,13 @@ import re
 import pandas as pd
 
 from llm.agent import dispatch, journal_markdown, run_agent
-from paths import ANALYSIS_DIR, ANALYSIS_JOURNAL, ANALYSIS_REPORT, INCIDENTS_FULL
+from paths import ANALYSIS_DIR, ANALYSIS_JOURNAL, ANALYSIS_REPORT, FRAMING, INCIDENTS_FULL
 
 from . import facts as F
-from .config import (CONSEQUENCE_WORDS, MIN_CHOSEN_DBCV, ASSET_LABELS, ASSET_TYPES, DIMENSION_LABELS, DIMENSIONS, PHASE_CLUSTERING,
-                     PHASE_PRIORITIES, PHASE_PROFILES, PHASE_THEMES, PRIORITY_CHAINS_RANGE, ROLE, SITE_PROFILES, TURNS)
+from .config import (CONSEQUENCE_WORDS, DIMENSION_LABELS, DIMENSIONS, MIN_CHOSEN_DBCV, PHASE_CLUSTERING, PHASE_PRIORITIES,
+                     PHASE_PROFILES, PHASE_THEMES, PRIORITY_CHAINS_RANGE, ROLE, TURNS, UNDETERMINED)
 from .report import export, render
-from .tools import TOOLS, AnalysisWorkspace
+from .tools import AnalysisWorkspace, tool_schemas
 from .validation_inferences import inference_sample
 from .judge import judge_report
 from .writing import cause_sheets, site_texts, synthesis
@@ -61,7 +63,7 @@ def phase_tools(ws: AnalysisWorkspace, names: list[str], fixed: dict):
     """Outils d'une phase : seulement `names`, avec les arguments `fixed` (type, dimension) imposés
     par le code et retirés du schéma vu par l'agent (il ne peut pas se tromper de cible)."""
     schemas, accepted = [], {}
-    for t in TOOLS:
+    for t in tool_schemas():
         if t["function"]["name"] in names:
             t = copy.deepcopy(t)
             params = t["function"]["parameters"]
@@ -78,7 +80,8 @@ def run_phase(ws, journal: list, title: str, task: str, names: list[str], fixed:
               nudge=None) -> bool:
     journal.append({"tour": 0, "type": "phase", "texte": title})
     tools, execute = phase_tools(ws, names, fixed)
-    events, ok = run_agent(ROLE, task, tools, execute, is_done=done, max_turns=turns, nudge=nudge)
+    events, ok = run_agent(ROLE.format(domaine=ws.cadrage.domain), task, tools, execute, is_done=done, max_turns=turns,
+                           nudge=nudge)
     journal.extend(events)
     print(f"  {'OK' if ok else 'Not OK'} => {title}")
     return ok
@@ -112,7 +115,7 @@ def fallback_themes(ws: AnalysisWorkspace, asset_type: str, dimension: str) -> l
     missing = ws.unthemed(asset_type, dimension)
     for t in missing:
         all_values = ws.causes.loc[run["positions"][run["labels"] == t], column].value_counts()
-        values = all_values.drop(index=["indéterminé"], errors="ignore")
+        values = all_values.drop(index=[UNDETERMINED], errors="ignore")
         # Mots-clés utilisables dans un nom de cause : sans mot de conséquence (« feu », « arrêt »...).
         keywords = [k for k in run["keywords"][t] if dimension != "cause"
                     or not (re.search(CONSEQUENCE_WORDS, k, re.I) or k.split()[0] == "départ")]
@@ -161,11 +164,11 @@ def fallback_priorities(ws: AnalysisWorkspace, asset_type: str) -> None:
 
 
 def fallback_profiles(ws: AnalysisWorkspace) -> None:
-    """L'agent n'a pas attribué les profils : pour chaque type, l'attribution qui respecte le plus
-    d'attentes des profils (config.PROFILE_EXPECTATIONS : « élevé » = site en tête, « faible » = en queue)."""
+    """L'agent n'a pas attribué les profils : pour chaque segment, l'attribution qui respecte le plus
+    d'attentes des profils (tirées du contexte au cadrage : « élevé » = site en tête, « faible » = en queue)."""
     table = ws.incidents_table()
     assignments = []
-    for asset_type in ASSET_TYPES:
+    for asset_type in ws.cadrage.profiled_segments:
         indicators = F.profile_indicators(table[table["asset_type"] == asset_type])
         best = F.best_assignments(indicators, asset_type)[0]
         assignments += [{"site": site, "profil": profile} for site, profile in best.items()]
@@ -178,6 +181,9 @@ def run(max_turns: int | None = None) -> bool:
     donné, le nombre de tours maximum de chaque phase."""
     if not INCIDENTS_FULL.exists():
         raise SystemExit(f"{INCIDENTS_FULL} introuvable : lancer d'abord l'étape pdf.")
+    if not FRAMING.exists():
+        from framing.pipeline import run as run_framing
+        run_framing()
     df = pd.read_csv(INCIDENTS_FULL)
     df = df[df["text"].notna()].reset_index(drop=True)
     ws = AnalysisWorkspace(df)
@@ -186,17 +192,17 @@ def run(max_turns: int | None = None) -> bool:
     print(f"Workflow d'analyse : {len(df)} incidents")
 
     # 0. Extraction (code) : pas de décision à prendre, donc pas d'agent.
-    for asset_type in ASSET_TYPES:
+    for asset_type in ws.segments:
         result = dispatch(ws.tools, "extract_causes", {"asset_type": asset_type})
         journal.append({"tour": 0, "type": "outil", "outil": "extract_causes (code)",
                         "arguments": {"asset_type": asset_type}, "resultat": result})
 
     # 1. Clustering puis thèmes, pour chaque type et chaque dimension (agent, une phase à la fois).
-    for asset_type in ASSET_TYPES:
+    for asset_type in ws.segments:
         for dimension in DIMENSIONS:
             k = ws.key(asset_type, dimension)
             fixed = {"asset_type": asset_type, "dimension": dimension}
-            label, asset = DIMENSION_LABELS[dimension], ASSET_LABELS[asset_type] + "s"
+            label, asset = DIMENSION_LABELS[dimension], f"du segment « {ws.cadrage.label(asset_type)} »"
             if not run_phase(ws, journal, f"Clustering {k}",
                              PHASE_CLUSTERING.format(label=label, asset=asset),
                              ["run_clustering", "select_clustering"], fixed, lambda: k in ws.selected,
@@ -241,32 +247,41 @@ def run(max_turns: int | None = None) -> bool:
                                          f"{len(merged)} doublons fusionnés automatiquement {merged}"})
 
     # 2. Chaînes cause -> conséquence prioritaires, lues sur la heatmap (agent).
-    for asset_type in ASSET_TYPES:
+    for asset_type in ws.segments:
         if not run_phase(ws, journal, f"Priorités {asset_type}",
-                         PHASE_PRIORITIES.format(asset=ASSET_LABELS[asset_type] + "s", sites=", ".join(ws.sites[asset_type])),
+                         PHASE_PRIORITIES.format(asset=f"du segment « {ws.cadrage.label(asset_type)} »",
+                                                 sites=", ".join(ws.sites[asset_type])),
                          ["heatmap_hotspots", "select_priority_chains"], {"asset_type": asset_type},
                          lambda a=asset_type: a in ws.priority_chains, turns["priorities"]):
             fallback_priorities(ws, asset_type)
             journal.append({"tour": 0, "type": "automatique", "texte": f"{asset_type} : chaînes prioritaires choisies par le code"})
 
-    # 3. Profils (agent).
-    profiles = json.dumps(SITE_PROFILES, ensure_ascii=False, indent=1)
-    sites = {a: ws.sites[a] for a in ASSET_TYPES}
-    if not run_phase(ws, journal, "Profils",
-                     PHASE_PROFILES.format(profiles=profiles) + f"\nSites : {json.dumps(sites, ensure_ascii=False)}",
-                     ["site_evidence", "assign_profiles"], {}, lambda: ws.profiles is not None, turns["profiles"]):
-        fallback_profiles(ws)
-        journal.append({"tour": 0, "type": "automatique", "texte": "profils attribués par le code (règles d'attentes)"})
+    # 3. Profils (agent), seulement pour les segments dont le contexte décrit des profils.
+    profiled = ws.cadrage.profiled_segments
+    if profiled:
+        profiles = json.dumps({a: ws.cadrage.profiles(a) for a in profiled}, ensure_ascii=False, indent=1)
+        sites = {a: ws.sites[a] for a in profiled}
+        if not run_phase(ws, journal, "Profils",
+                         PHASE_PROFILES.format(profiles=profiles, segments=", ".join(profiled))
+                         + f"\nSites : {json.dumps(sites, ensure_ascii=False)}",
+                         ["site_evidence", "assign_profiles"], {}, lambda: ws.profiles is not None, turns["profiles"]):
+            fallback_profiles(ws)
+            journal.append({"tour": 0, "type": "automatique", "texte": "profils attribués par le code (règles d'attentes)"})
+    else:
+        journal.append({"tour": 0, "type": "phase", "texte": "Profils : aucun profil dans le contexte, chaque site est "
+                                                            "caractérisé par ce qui le distingue des autres sites"})
+    assigned = ws.profiles or {}
 
     # 4. Rédaction contrôlée (faits Python, reformulation LLM, validateur), puis relecture par le juge.
     journal.append({"tour": 0, "type": "phase", "texte": "Rédaction (faits calculés, reformulés et validés)"})
     table = ws.incidents_table()
     site_reports = []
-    for asset_type in ASSET_TYPES:
+    for asset_type in ws.segments:
         sub = table[table["asset_type"] == asset_type]
         indicators = F.profile_indicators(sub)
         for site in ws.sites[asset_type]:
-            site_reports.append(site_texts(site, asset_type, ws.profiles[site]["profil"], sub, indicators, journal))
+            profile = assigned.get(site, {}).get("profil")
+            site_reports.append(site_texts(site, asset_type, profile, sub, indicators, journal))
     fleet = F.fleet_priorities(table)
     sheets = cause_sheets(table, journal)
     synthese, synthese_facts = synthesis(table, site_reports, fleet, journal, ws.priority_chains)

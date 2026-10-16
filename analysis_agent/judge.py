@@ -16,7 +16,9 @@ import json
 
 from llm.client import chat
 
-from .config import JUDGE_ROLE, PREVENTIVE_CATALOGUE
+from framing.cadrage import current
+
+from .config import JUDGE_ROLE
 from .writing import measure_errors, numbers, text_errors
 
 GRID_JUSTIFICATION = """1. Chaque affirmation (chiffre, phénomène) figure-t-elle dans les faits ?
@@ -31,7 +33,7 @@ GRID_CAUSES = """1. Les causes citées sont-elles les plus fréquentes des faits
 
 GRID_MEASURE = """1. La mesure nomme-t-elle un équipement précis ?
 2. Vise-t-elle un défaut précis de la cause (pas « détecter l'usure » en général) ?
-3. Indique-t-elle une fréquence ou un déclencheur (après chaque tempête, avant l'été...) ?
+3. Indique-t-elle une fréquence ou un déclencheur (après chaque épisode à risque, avant la saison à risque...) ?
 4. Réduit-elle vraiment la cause, ou se contente-t-elle de la surveiller ?
 5. Le mécanisme est-il concret, et non circulaire (pas « une inspection régulière permet de détecter ») ?
 La correction doit rester une mesure PRÉVENTIVE ou organisationnelle à l'échelle du site, jamais une \
@@ -86,7 +88,7 @@ def judge_report(report: dict, journal: list[dict]) -> dict:
             if decide(f"{s['site']} / {field}", v, errors, v["correction"].strip() != s[field].strip(), journal, stats):
                 s[field] = v["correction"]
         for p in s["plan"]:
-            hint = PREVENTIVE_CATALOGUE.get(p["facteur"])
+            hint = current().measure(p["facteur"])
             plan_facts = (f"Cause : {p['cause']} (facteur : {p['facteur'] or 'non précisé'}) ; {p['incidents']} incidents.\n"
                           + (f"Exemple de mesure préventive pour ce facteur : {hint[1]} ({hint[2]})." if hint else ""))
             text = f"Mesure : {p['action']}\nMécanisme : {p['mecanisme']}"
@@ -97,7 +99,7 @@ def judge_report(report: dict, journal: list[dict]) -> dict:
             if decide(f"{s['site']} / mesure « {p['cause']} »", v, errors, changed, journal, stats):
                 p["action"], p["mecanisme"] = v["mesure"], v["mecanisme"]
     for f in report.get("fiches", []):
-        hint = PREVENTIVE_CATALOGUE.get(f["facteur"])
+        hint = current().measure(f["facteur"])
         sheet_facts = f["faits"] + (f"\nExemple de mesure préventive pour ce facteur : {hint[1]} ({hint[2]})." if hint else "")
         v = ask_judge("mesure d'une fiche de cause", f"Mesure : {f['mesure']}\nMécanisme : {f['mecanisme']}", sheet_facts,
                       GRID_MEASURE, {"mesure": "la mesure corrigée", "mecanisme": "le mécanisme corrigé"})

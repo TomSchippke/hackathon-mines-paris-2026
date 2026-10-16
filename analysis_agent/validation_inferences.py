@@ -1,7 +1,7 @@
 """Validation manuelle des causes INFÉRÉES par le LLM.
 
 1. `inference_sample` tire un échantillon aléatoire stratifié (graine fixe) d'incidents dont la cause
-   a été inférée (VALIDATION_SAMPLE par type d'installation) et l'écrit dans
+   a été inférée (VALIDATION_SAMPLE par segment) et l'écrit dans
    outputs/validation/inferences_a_valider.csv, avec une colonne vide `verdict_humain`.
    Le fichier est créé une seule fois et n'est JAMAIS écrasé : il contient le travail manuel.
 2. On remplit `verdict_humain` à la main : « oui » si la cause inférée est correcte, « non » sinon.
@@ -31,6 +31,8 @@ def inference_sample(incidents: pd.DataFrame, path: Path = INFERENCE_VALIDATION)
     if path.exists():
         return path
     inferred = incidents[incidents["cause_type"] == "inférée"]
+    if inferred.empty:  # rien à valider : pas de fichier (il sera créé quand il y aura des inférences)
+        return path
     sample = pd.concat([g.sample(min(VALIDATION_SAMPLE, len(g)), random_state=VALIDATION_SEED)
                         for _, g in inferred.groupby("asset_type")])
     out = sample[["incident_id", "asset_type", "site", "text", "cause_racine", "indice", "facteur_principal"]].rename(

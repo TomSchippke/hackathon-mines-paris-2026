@@ -1,7 +1,9 @@
 """Organisation du dossier outputs/ (voir outputs/README.md).
 
+    context/               contexte.md : la description du problème écrite par l'utilisateur
     outputs/
     ├── 1_extraction/      étape 1 (pdf)          : incidents_full.csv          ← à utiliser
+    ├── 1b_cadrage/        étape 1b (cadrage)     : cadrage.json, cadrage.md    ← à relire
     ├── 2_analyse/         étape 2 (analyse)      : rapport, thèmes, causes     ← à utiliser
     ├── 3_verification/    étape 3 (verification) : avis de l'agent vérificateur ← à utiliser
     ├── validation/        causes inférées à vérifier à la main (jamais écrasé)
@@ -13,6 +15,16 @@ from pathlib import Path
 
 DATA_CSV = Path("data/incidents_students.csv")
 OUTPUTS = Path("outputs")
+
+# Le seul savoir sur le problème donné aux agents : un court texte écrit par l'utilisateur.
+CONTEXT_DIR = Path("context")
+CONTEXT_PROMPT = CONTEXT_DIR / "contexte.md"
+# Cadrage écrit ou corrigé à la main : s'il existe, il remplace celui proposé par le LLM.
+FRAMING_OVERRIDE = CONTEXT_DIR / "cadrage.json"
+
+# Étape 1b : cadrage (listes fermées, segments, profils éventuels, déduits du contexte et des données)
+FRAMING_DIR = OUTPUTS / "1b_cadrage"
+FRAMING = FRAMING_DIR / "cadrage.json"
 
 # Étape 1 : extraction des PDF
 EXTRACTION_DIR = OUTPUTS / "1_extraction"

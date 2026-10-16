@@ -3,7 +3,7 @@
 Étapes :
   1. Lecture de `outputs/1_extraction/incidents_full.csv` (sortie de pdf_pipeline).
   2. Embeddings Azure OpenAI des descriptions (cache : seuls les nouveaux textes sont envoyés).
-  3. Un modèle BERTopic par type d'installation (PV / éolien) : UMAP -> HDBSCAN -> mots-clés.
+  3. Un modèle BERTopic par segment (colonne asset_type) : UMAP -> HDBSCAN -> mots-clés.
   4. Sorties dans outputs/exploration/topics/ (lancement manuel, hors pipeline principale) :
        incidents_topics.csv   chaque incident avec son topic ;
        topic_info.csv         chaque topic : taille, mots-clés, exemples représentatifs ;
@@ -121,6 +121,6 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--input", type=Path, default=INCIDENTS_FULL)
     parser.add_argument("--min-cluster-size", type=int, default=MIN_CLUSTER_SIZE)
-    parser.add_argument("--no-split", action="store_true", help="un seul modèle pour PV et éolien")
+    parser.add_argument("--no-split", action="store_true", help="un seul modèle pour tous les segments")
     args = parser.parse_args()
     run(args.input, args.min_cluster_size, split=not args.no_split)

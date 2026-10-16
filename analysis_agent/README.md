@@ -1,8 +1,12 @@
 # Étape 2 : workflow d'analyse
 
 Analyse les 1800 incidents et produit le **rapport d'analyse** (`outputs/2_analyse/rapport_analyse.md`) :
-causes racines, chaînes cause → conséquence, association de chaque site à son profil (A, B, C du
-sujet), écarts au profil, plan de remédiation par site et priorisation à l'échelle du parc.
+causes racines, chaînes cause → conséquence, caractérisation de chaque site (ou association à un
+profil, si le contexte en décrit), plan de remédiation par site et priorisation sur l'ensemble des sites.
+
+L'agent ne sait **rien du problème a priori** : segments, facteurs, composants, catégories de
+conséquence, profils éventuels et mesures préventives types viennent du **cadrage**
+([`framing/`](../framing/README.md)), déduit de `context/contexte.md` et des données.
 
 ```bash
 python main.py --steps analyse       # ou : python -m analysis_agent
@@ -20,9 +24,10 @@ python main.py --steps analyse       # ou : python -m analysis_agent
 
 ```
 0. code       extraction : cause, type de cause, conséquence, catégorie de conséquence (LLM, en cache)
-1. agent      ×4 (solar/wind × causes/conséquences) : clustering, puis nommage des thèmes
+1. agent      pour chaque segment × (causes, conséquences) : clustering, puis nommage des thèmes
 2. agent      priorités : heatmap thèmes de causes × thèmes de conséquences -> chaînes prioritaires
-3. agent      profils : points distinctifs de chaque site -> profil A, B, C
+3. agent      profils (seulement si le contexte en décrit) : points distinctifs -> profil de chaque site ;
+              sinon chaque site est caractérisé par ce qui le distingue des autres sites de son segment
 4. code + LLM rédaction : faits Python -> reformulation LLM -> validateur -> texte Python si échec
               (plans par site, fiche + criticité Pareto de chaque cause, synthèse) ; puis juge
 ```
@@ -88,8 +93,8 @@ L'extraction renvoie aussi `maintenance_suspectee` (non / plausible / probable) 
 (encrassement accumulé, corrosion avancée, usure poussée...), si un défaut de maintenance a pu laisser
 l'incident se produire. C'est un champ **séparé** : `cause_racine` et `cause_type` restent stricts
 (indice vérifié). La part « probable » est un **indicateur secondaire** (`config.MAINTENANCE_INDICATOR`) :
-montrée dans `site_evidence`, la heatmap, les fiches et le rapport, mais absente de
-`PROFILE_EXPECTATIONS`, donc sans effet sur l'attribution des profils.
+montrée dans `site_evidence`, la heatmap, les fiches et le rapport, mais jamais critère d'un profil,
+donc sans effet sur l'attribution des profils.
 
 ## Fiches des causes et criticité Pareto (repris de la branche octave)
 
@@ -99,12 +104,16 @@ triés par coût total, part cumulée ≤ 70 % critique, ≤ 90 % élevée, ≤ 
 conséquences les plus coûteuses (lues dans la heatmap), mesure préventive et mécanisme. Mêmes règles
 que les plans : faits calculés, validateur, catalogue de secours, puis relecture de la mesure par le juge.
 
-## Phase 3 : profils (agent)
+## Phase 3 : profils (agent, seulement si le contexte décrit des profils)
+
+Les profils et leurs attentes (« tel critère élevé / faible sur ce site ») sont tirés du contexte au
+cadrage ; un segment n'a de profils que s'il y en a autant que de sites. Les critères mesurés sont les
+facteurs du cadrage et deux indicateurs de l'extraction (usure / âge, maintenance).
 
 | Outil | Ce qu'il fait | Bornes et contrôles |
 |---|---|---|
 | `site_evidence(asset_type)` | pour chaque site : **points distinctifs** (critères où il est seul en tête ou en queue avec un écart net), causes connues les plus fréquentes, part de causes non précisées ; critères des profils mesurés sur chaque site | — |
-| `assign_profiles(assignments)` | associe chaque site à un profil | les 6 sites ; **A, B, C une fois chacun** par type |
+| `assign_profiles(assignments)` | associe chaque site à un profil | tous les sites des segments à profils ; **chaque profil une fois** par segment ; refusée si elle respecte moins d'attentes que la meilleure |
 
 ## Phase 4 : rédaction contrôlée (`facts.py`, `writing.py`)
 
@@ -115,11 +124,11 @@ Tout ce que le rapport affirme est calculé en Python :
 | Points distinctifs | critère où le site est seul en tête (ou en queue), avec au moins 3 points d'écart et 1.5 fois la valeur suivante ; critères à 0 % ou égaux partout ignorés |
 | Causes dominantes | 3 thèmes de causes **connues** les plus fréquents du site (hors « non précisée » et « non classé ») |
 | Plan d'actions | 3 causes connues au plus fort **coût total** (fréquence × coût moyen), **hors arrêts de sécurité nominaux** ; priorité selon leur part du coût du site (≥ 25 % haute, ≥ 10 % moyenne) |
-| Arrêts de sécurité nominaux | arrêt automatique de gravité mineure (`config.NOMINAL_*`) : la protection a fonctionné, ce n'est pas une panne ; présentés à part comme perte structurelle liée à l'exposition du site, avec des leviers d'optimisation, et exclus des plans et de la priorisation |
-| Priorisation du parc | 8 couples (site, cause) au plus fort coût, hors arrêts nominaux, avec le coût par an |
+| Arrêts de sécurité nominaux | catégorie de conséquence marquée « fonctionnement normal » au cadrage, avec la sévérité la plus faible : la protection a fonctionné, ce n'est pas une panne ; présentés à part comme perte structurelle liée à l'exposition du site, avec des leviers d'optimisation, et exclus des plans et de la priorisation |
+| Priorisation sur l'ensemble des sites | 8 couples (site, cause) au plus fort coût, hors arrêts nominaux, avec le coût par an |
 | Origine des causes | part de causes explicites / inférées parmi les causes dominantes de chaque site |
 | Robustesse | meilleure association site → profil recalculée avec les **seules causes explicites** : identique ou non |
-| Écarts au profil | règles « profil → attentes » (`config.PROFILE_EXPECTATIONS`) comparées aux mesures |
+| Écarts au profil | attentes des profils (tirées du contexte au cadrage) comparées aux mesures |
 | Pourcentages | **toujours** en part de l'ensemble des incidents du site |
 
 Le LLM reformule ces faits : justification du profil, causes dominantes, synthèse, et pour chaque
@@ -127,13 +136,12 @@ cause du plan une **mesure préventive ou organisationnelle à l'échelle du sit
 d'inspection, nettoyage planifié, équipement de protection, procédure, monitoring...), avec son
 **mécanisme** (pourquoi elle réduit la cause). Le **validateur** rejette un texte si :
 - un nombre cité n'existe pas dans les faits (arrondi toléré, « 1,4 M€ » accepté) ;
-- un phénomène cité (corrosion, foudre, chaleur...) est absent des faits ;
+- un phénomène cité (un facteur du cadrage, reconnu par ses mots-clés ; l'âge ou l'environnement du site) est absent des faits ;
 - il contient le mot « rang » ;
 - une mesure est vague (« renforcer la maintenance ») ou curative (commence par « remplacer »,
   « réparer »...), ou son mécanisme ne parle pas de la cause.
 
-Si le LLM échoue, la mesure vient d'un **catalogue de mesures préventives par facteur**
-(`config.PREVENTIVE_CATALOGUE`), qui passe lui-même le validateur.
+Si le LLM échoue, la mesure vient de la **mesure préventive type du facteur**, proposée au cadrage.
 
 Si le site ne vérifie nettement aucune attente de son profil, la justification doit dire qu'il est
 **attribué par élimination**.

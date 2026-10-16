@@ -3,8 +3,8 @@
 # Embeddings : appels Azure OpenAI par lots.
 EMBEDDING_BATCH_SIZE = 16
 
-# Le vocabulaire PV et éolien diffère fortement : clusteriser ensemble ferait surtout ressortir
-# cette séparation. Un modèle BERTopic par type d'installation.
+# Le vocabulaire diffère d'un segment à l'autre : clusteriser ensemble ferait surtout ressortir
+# cette séparation. Un modèle BERTopic par segment.
 SPLIT_COLUMN = "asset_type"
 
 # UMAP : réduction de dimension avant clustering (random_state fixé : résultats reproductibles).

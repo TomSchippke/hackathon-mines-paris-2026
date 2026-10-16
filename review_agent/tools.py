@@ -16,13 +16,13 @@ from pathlib import Path
 
 import pandas as pd
 
-from analysis_agent.config import CONSEQUENCE_WORDS
-from analysis_agent.writing import measure_errors
 from analysis_agent import facts as F
-from analysis_agent.config import (ASSET_TYPES, DIMENSIONS, MAX_CLUSTERING_RUNS,
-                                   MAX_UNCLASSIFIED_PCT, MIN_STABILITY, N_TOPICS_RANGE, SITE_PROFILES)
-from cause_extraction.config import CAUSE_INCONNUE
+from analysis_agent.config import (CONSEQUENCE_WORDS, DIMENSIONS, MAX_CLUSTERING_RUNS, MAX_UNCLASSIFIED_PCT, MIN_STABILITY,
+                                   N_TOPICS_RANGE)
 from analysis_agent.tools import percent
+from analysis_agent.writing import measure_errors
+from cause_extraction.config import CAUSE_INCONNUE
+from framing.cadrage import current
 from llm.agent import ToolError
 
 from .config import FIELDS, GRAVITES, JOURNAL_PAGE_MAX, RESULT_MAX_CHARS, TARGETS_EXTRA, VERDICTS
@@ -52,6 +52,8 @@ class ReviewWorkspace:
         self.verdict: dict | None = None
         self.report_read = False
         self.sites = sorted(self.incidents["site"].unique())
+        self.cadrage = current()
+        self.context_columns = [c for c in self.decisions.get("colonnes_contexte", []) if c in self.incidents]
         self.checks = self.automatic_checks()
 
     @property
@@ -71,7 +73,7 @@ class ReviewWorkspace:
               "rapport_analyse.md présent" if self.report_md else "l'agent n'a pas terminé : pas de rapport")
         essais = self.decisions.get("essais", {})
         chosen = self.decisions.get("clustering_choisi", {})
-        for asset_type in ASSET_TYPES:
+        for asset_type in self.cadrage.segments:
             sub = self.incidents[self.incidents["asset_type"] == asset_type]
             analysed = sub["erreur_analyse"].eq("") if "erreur_analyse" in sub else pd.Series(False, index=sub.index)
             check(f"{asset_type} : causes et conséquences extraites", analysed.mean() >= 0.95,
@@ -99,11 +101,11 @@ class ReviewWorkspace:
                 check(f"{k} : chaque cluster dans un thème", classified[f"theme_{d}_id"].notna().all(),
                       f"{classified[f'theme_{d}_id'].isna().sum()} incidents classés sans thème")
         if self.report:
-            for asset_type in ASSET_TYPES:
+            for asset_type in self.cadrage.profiled_segments:
                 sites = set(self.incidents.loc[self.incidents["asset_type"] == asset_type, "site"])
-                profiles = sorted(s["profil"] for s in self.report["sites"] if s["site"] in sites)
-                check(f"{asset_type} : profils A, B, C attribués une fois chacun",
-                      profiles == sorted(SITE_PROFILES[asset_type]), f"profils attribués : {profiles}")
+                profiles = sorted(str(s["profil"]) for s in self.report["sites"] if s["site"] in sites)
+                check(f"{asset_type} : chaque profil du contexte attribué une fois",
+                      profiles == sorted(self.cadrage.profiles(asset_type)), f"profils attribués : {profiles}")
                 indicators = F.profile_indicators(self.incidents[self.incidents["asset_type"] == asset_type])
                 chosen = {s["site"]: s["profil"] for s in self.report["sites"] if s["site"] in sites}
                 best = F.best_assignments(indicators, asset_type)
@@ -124,7 +126,7 @@ class ReviewWorkspace:
             check("plans : mesures préventives avec mécanisme", not bad_plans,
                   f"mesures à revoir : {bad_plans}" if bad_plans else "toutes les mesures sont préventives et justifiées")
             chains = self.decisions.get("chaines_prioritaires", {})
-            for asset_type in ASSET_TYPES:
+            for asset_type in self.cadrage.segments:
                 choice = chains.get(asset_type)
                 check(f"{asset_type} : chaînes cause -> conséquence prioritaires (heatmap)", bool(choice and choice["chaines"]),
                       ("choix automatique par le code" if choice["justification"].startswith("CHOIX AUTOMATIQUE")
@@ -192,13 +194,13 @@ class ReviewWorkspace:
             if "lie_vieillissement" in ok else None,
             "lie_maintenance_pct": round(100 * ok["lie_maintenance"].astype(bool).mean(), 1)
             if "lie_maintenance" in ok else None,
-            "severe_pct": round(100 * (g["severity"] == "sévère").mean(), 1),
+            F.severe_criterion() + " (%)": round(100 * (g["severity"] == self.cadrage.most_severe).mean(), 1),
             "cout_moyen_eur": round(g["estimated_cost_eur"].mean()), "arret_moyen_h": round(g["downtime_hours"].mean(), 1),
-            "meteo_pct": percent(g["weather_condition"], top=5),
+            **{f"{c}_pct": percent(g[c], top=5) for c in self.context_columns},
         }
         claimed = next((s for s in (self.report or {}).get("sites", []) if s["site"] == site), None)
         asset_type = g["asset_type"].iloc[0]
-        return {"site": site, "chiffres_recalcules": facts, "profils_possibles": SITE_PROFILES[asset_type],
+        return {"site": site, "chiffres_recalcules": facts, "profils_possibles": self.cadrage.profiles(asset_type),
                 "ce_que_dit_le_rapport": claimed}
 
     def theme_facts(self, theme_id: str) -> dict:

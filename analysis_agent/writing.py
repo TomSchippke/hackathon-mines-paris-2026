@@ -1,10 +1,10 @@
 """Rédaction contrôlée : le LLM reformule des faits calculés en Python, un validateur vérifie.
 
-Pour chaque texte du rapport (justification d'un profil, causes dominantes, actions, synthèse) :
+Pour chaque texte du rapport (profil ou caractérisation d'un site, causes dominantes, actions, synthèse) :
   1. le LLM reçoit UNIQUEMENT les faits calculés (facts.py) et répond en JSON imposé ;
   2. le validateur compare sa réponse aux faits :
        - chaque nombre cité doit exister dans les faits (arrondi toléré) ;
-       - chaque phénomène cité (corrosion, foudre, chaleur...) doit figurer dans les faits ;
+       - chaque phénomène cité (un facteur du cadrage, reconnu par ses mots-clés) doit figurer dans les faits ;
        - le mot « rang » est interdit (les rangs inventés étaient l'erreur la plus fréquente) ;
        - une action ne doit pas être vague (« renforcer la maintenance ») ;
   3. en cas d'erreur, le LLM reçoit la liste des erreurs et réessaie (WRITE_RETRIES fois) ;
@@ -18,29 +18,25 @@ import json
 import re
 from typing import Callable
 
+from framing.cadrage import current
 from llm.client import chat
 
 from . import facts as F
-from .config import (ACTION_TYPES, ASSET_LABELS, CURATIVE_PATTERN, GENERIC_ACTIONS, PREVENTIVE_CATALOGUE,
-                     SITE_PROFILES, WRITE_RETRIES, WRITER_ROLE)
+from .config import ACTION_TYPES, CURATIVE_PATTERN, GENERIC_ACTIONS, WRITE_RETRIES, WRITER_ROLE
 
 # Phénomènes surveillés par le validateur : un texte ne peut en citer un que s'il figure dans les faits.
-CONCEPTS = {
-    "chaleur": r"chaleur|canicule",
-    "tempête / vent fort": r"tempête|vent fort|rafale",
-    "foudre / orage": r"foudre|orage",
-    "grêle": r"grêle",
-    "embruns / corrosion": r"embrun|corrosion|salin",
-    "poussière / encrassement": r"poussière|encrass|salissure",
-    "nuisibles": r"nuisible|rongeu|rongement|animaux",
-    "sol / fondations": r"\bsols?\b|fondation|tassement",
-    "défaut de fabrication": r"fabrica|série défectueuse",
+# Les facteurs du cadrage (reconnus par leurs mots-clés), plus ce que décrit un profil ou un contexte
+# sans être mesuré : âge, environnement. Interdit si absent des faits (une justification doit
+# s'appuyer sur les mesures, pas recopier la description du profil ou du contexte).
+GENERIC_CONCEPTS = {
     "usure / vieillissement": r"usure|vieilli",
-    # Ce que décrit un profil sans être mesuré : âge, environnement. Interdit si absent des faits
-    # (une justification doit s'appuyer sur les mesures, pas recopier la description du profil).
     "âge du site": r"\b\d+\s*ans\b|âgé|récent|ancien|jeunesse|vieux",
     "environnement du site": r"\bzones?\b|côti|continental|altitude|plaine|agricole|océan|littoral|maritime",
 }
+
+
+def concept_patterns() -> dict[str, str]:
+    return {**{name: rf"\b(?:{pattern})" for name, pattern in current().concepts().items()}, **GENERIC_CONCEPTS}
 NUMBER = re.compile(r"(\d{1,3}(?:[   ]\d{3})+|\d+)(?:[.,](\d+))?\s*(k€|M€|k ?€|M ?€)?")
 
 
@@ -59,7 +55,7 @@ def numbers(text: str) -> list[float]:
 
 
 def concepts(text: str) -> set[str]:
-    return {name for name, pattern in CONCEPTS.items() if re.search(pattern, text, re.IGNORECASE)}
+    return {name for name, pattern in concept_patterns().items() if re.search(pattern, text, re.IGNORECASE)}
 
 
 def text_errors(text: str, facts_text: str) -> list[str]:
@@ -147,23 +143,24 @@ def measure_errors(action: dict, cause: str, factor: str) -> list[str]:
 
 
 def catalogue_measure(cause: str, factor: str) -> dict:
-    """Mesure préventive type du facteur (config.PREVENTIVE_CATALOGUE), utilisée si le LLM échoue."""
-    if factor in PREVENTIVE_CATALOGUE:
-        kind, mesure, mecanisme = PREVENTIVE_CATALOGUE[factor]
+    """Mesure préventive type du facteur (proposée au cadrage), utilisée si le LLM échoue."""
+    if current().measure(factor):
+        kind, mesure, mecanisme = current().measure(factor)
         return {"cause": cause, "type": kind, "mesure": mesure + ".", "mecanisme": mecanisme + "."}
     return {"cause": cause, "type": "procédure", "mesure": f"{TO_DEFINE} : analyser les incidents « {cause} » pour définir "
             "une mesure préventive.", "mecanisme": "aucune mesure préventive type n'existe pour ce facteur."}
 
 
-def site_texts(site: str, asset_type: str, profile: str, incidents, indicators: dict, journal: list[dict]) -> dict:
-    """Justification du profil, causes dominantes et une mesure préventive par cause prioritaire."""
+def site_texts(site: str, asset_type: str, profile: str | None, incidents, indicators: dict, journal: list[dict]) -> dict:
+    """Justification du profil (ou, sans profils au cadrage, ce qui distingue le site), causes
+    dominantes et une mesure préventive par cause prioritaire."""
     g = incidents[incidents["site"] == site]
     points = F.distinctive_points(indicators, site)
     dominant = F.dominant_causes(g)
     priority = F.priority_causes(g)
     factors = {p["cause"]: F.dominant_factor(incidents, p["cause"]) for p in priority}
 
-    by_elimination = not F.expectations_met(indicators, site, asset_type, profile)
+    by_elimination = profile is not None and not F.expectations_met(indicators, site, asset_type, profile)
     profile_facts = "\n".join(f"- {F.point_text(p)}" for p in points) or "- aucun critère ne distingue nettement ce site"
     if by_elimination:
         profile_facts += ("\n- Profil attribué par élimination : aucun critère mesuré ne correspond nettement à ce "
@@ -172,15 +169,20 @@ def site_texts(site: str, asset_type: str, profile: str, incidents, indicators: 
                                f"du site" for d in dominant)
     priority_facts = "\n".join(f"- {p['cause']} (facteur : {factors[p['cause']] or 'non précisé'}) : {p['incidents']} "
                                f"incidents, coût total {F.euros(p['cout_total'])}" for p in priority)
-    facts_text = (f"Site : {site}. Profil attribué : {profile} ({SITE_PROFILES[asset_type][profile]}).\n"
+    profile_line = (f" Profil attribué : {profile} ({current().profiles(asset_type)[profile]})." if profile else "")
+    facts_text = (f"Site : {site} ({current().label(asset_type)}).{profile_line}\n"
                   f"Points distinctifs du site :\n{profile_facts}\n"
                   f"Causes connues les plus fréquentes :\n{dominant_facts}\n"
                   f"Causes connues les plus coûteuses, hors arrêts de sécurité nominaux (à traiter dans le plan) :\n"
                   f"{priority_facts}")
     task = ("Rédige en JSON :\n"
-            "- justification_profil : 2 phrases qui expliquent pourquoi ce site correspond au profil, en citant les "
-            "points distinctifs et leurs chiffres. Ne décris pas le profil lui-même et n'évoque aucun phénomène absent "
-            "des points distinctifs.\n"
+            + ("- justification_profil : 2 phrases qui expliquent pourquoi ce site correspond au profil, en citant les "
+               "points distinctifs et leurs chiffres. Ne décris pas le profil lui-même et n'évoque aucun phénomène absent "
+               "des points distinctifs.\n" if profile else
+               "- justification_profil : 2 phrases qui disent ce qui distingue ce site des autres sites du même segment, "
+               "en citant les points distinctifs et leurs chiffres (ou, s'il n'y en a aucun, qu'aucun critère ne le "
+               "distingue nettement). N'évoque aucun phénomène absent des points distinctifs.\n")
+            +
             "- causes_dominantes : 1 phrase qui reformule les causes connues les plus fréquentes, avec leurs chiffres.\n"
             "- actions : pour CHAQUE cause la plus coûteuse, une MESURE PRÉVENTIVE ou ORGANISATIONNELLE à l'échelle du "
             "site (programme d'inspection, fréquence de nettoyage, équipement de protection, procédure, monitoring), "
@@ -211,9 +213,11 @@ def site_texts(site: str, asset_type: str, profile: str, incidents, indicators: 
     def fallback(field: str, out: dict) -> dict:
         out = dict(out)
         if field == "justification_profil":
-            out[field] = ((f"Profil {profile} attribué par élimination (aucun critère mesuré ne lui correspond nettement)"
-                           if by_elimination else f"Profil {profile} retenu")
-                          + (" ; points distinctifs : " + " ; ".join(F.point_text(p) for p in points) if points else "") + ".")
+            lead = (f"Profil {profile} attribué par élimination (aucun critère mesuré ne lui correspond nettement)"
+                    if by_elimination else f"Profil {profile} retenu" if profile else
+                    "Ce qui distingue ce site" if points else
+                    "Aucun critère ne distingue nettement ce site des autres sites du segment")
+            out[field] = lead + (" ; points distinctifs : " + " ; ".join(F.point_text(p) for p in points) if points else "") + "."
         elif field == "causes_dominantes":
             out[field] = "Causes connues les plus fréquentes : " + ", ".join(
                 f"{d['cause']} ({d['incidents']} incidents, {d['part_incidents_pct']} % des incidents du site)" for d in dominant) + "."
@@ -239,26 +243,26 @@ def site_texts(site: str, asset_type: str, profile: str, incidents, indicators: 
 def synthesis(incidents, site_reports: list[dict], fleet, journal: list[dict],
               chains: dict[str, dict] | None = None) -> tuple[str, str]:
     """Synthèse pour un responsable : chiffres clés, chaînes cause -> conséquence prioritaires (heatmap)
-    et actions prioritaires du parc."""
+    et actions prioritaires de l'ensemble des sites."""
     by_site = incidents.groupby("site")["estimated_cost_eur"].sum().sort_values(ascending=False)
     actions = {(r["site"], p["cause"]): p["action"] for r in site_reports for p in r["plan"]}
     structural = F.structural_losses(incidents)
     top = fleet.head(3)
     facts_text = "\n".join([
         f"- {len(incidents)} incidents, coût total {F.euros(incidents['estimated_cost_eur'].sum())}.",
-        *(f"- {a} : {F.unknown_share(incidents[incidents['asset_type'] == a])} % des incidents sans cause précisée "
+        *(f"- {current().label(a)} : {F.unknown_share(incidents[incidents['asset_type'] == a])} % des incidents sans cause précisée "
           "dans le rapport." for a in sorted(incidents["asset_type"].unique())),
         f"- Site le plus coûteux : {by_site.index[0]} ({F.euros(by_site.iloc[0])}).",
         f"- Arrêts de sécurité nominaux (fonctionnement normal des protections, pas des pannes) : "
         f"{int(structural['arrets'].sum())} incidents, {F.euros(structural['cout_par_an'].sum())} par an de perte structurelle.",
-        *(f"- Priorité {i} du parc : {r.cause} sur {r.site} ({r.incidents} incidents, {F.euros(r.cout_par_an)} par an) ; "
+        *(f"- Priorité {i} de l'ensemble des sites : {r.cause} sur {r.site} ({r.incidents} incidents, {F.euros(r.cout_par_an)} par an) ; "
           f"mesure : {actions.get((r.site, r.cause), 'à définir')}" for i, r in enumerate(top.itertuples(), 1)),
-        *(f"- Chaîne prioritaire ({ASSET_LABELS[a]}) : {c['cause']} -> {c['consequence']} ({c['incidents']} incidents, "
+        *(f"- Chaîne prioritaire ({current().label(a)}) : {c['cause']} -> {c['consequence']} ({c['incidents']} incidents, "
           f"{F.euros(c['cout_total'])})" for a, d in (chains or {}).items() for c in d["chaines"][:2]),
     ])
     task = ("Rédige en JSON une synthèse de 4 à 7 phrases pour un responsable : coût total, part des causes non "
             "précisées, site le plus coûteux, arrêts de sécurité nominaux (perte structurelle, pas des pannes), les "
-            "chaînes cause -> conséquence prioritaires, puis les 3 mesures prioritaires du parc avec leur coût par an.")
+            "chaînes cause -> conséquence prioritaires, puis les 3 mesures prioritaires de l'ensemble des sites avec leur coût par an.")
     schema = {"type": "object", "additionalProperties": False, "required": ["synthese"],
               "properties": {"synthese": {"type": "string"}}}
 
@@ -288,7 +292,7 @@ def cause_sheets(incidents, journal: list[dict]) -> list[dict]:
             sites = (100 * g["site"].value_counts(normalize=True)).round(1)
             cons_facts = "\n".join(f"- {c.consequence} : {c.incidents} incidents, coût total {F.euros(c.cout_total)}"
                                    for c in cons.itertuples()) or "- aucune conséquence classée"
-            facts_text = (f"Cause : {row.cause} ({ASSET_LABELS[asset_type]}). Facteur dominant : {row.facteur or 'non précisé'}.\n"
+            facts_text = (f"Cause : {row.cause} ({current().label(asset_type)}). Facteur dominant : {row.facteur or 'non précisé'}.\n"
                           f"{row.incidents} incidents, coût total {F.euros(row.cout_total)}, coût moyen "
                           f"{F.euros(row.cout_moyen)}, {row.part_cout_pct} % du coût des causes connues.\n"
                           f"Sites : " + ", ".join(f"{s} {v} %" for s, v in sites.items()) + ".\n"

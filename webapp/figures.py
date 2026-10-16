@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from analysis_agent import facts as F  # noqa: E402
-from analysis_agent.config import ASSET_LABELS  # noqa: E402
+from framing.cadrage import current  # noqa: E402
 
 ANALYSIS = ROOT / "outputs" / "2_analyse"
 REVIEW = ROOT / "outputs" / "3_verification"
@@ -26,8 +26,15 @@ REVIEW = ROOT / "outputs" / "3_verification"
 # Criticité : palette de statut, toujours accompagnée de son libellé (jamais la couleur seule).
 TIER_COLORS = {"Critique": "#d03b3b", "Élevée": "#ec835a", "Moyenne": "#fab219", "Faible": "#0ca30c"}
 TIERS = list(TIER_COLORS)
-# Type d'installation : deux premières couleurs catégorielles, dans un ordre fixe.
-ASSET_COLORS = {"photovoltaïque": "#2a78d6", "éolien": "#eb6834"}
+# Segments (libellés du cadrage) : couleurs catégorielles, dans l'ordre des segments.
+CATEGORICAL = ["#2a78d6", "#eb6834", "#1baf7a", "#8f5bd6", "#d6a21b", "#d6457a"]
+
+
+def segment_colors() -> dict[str, str]:
+    c = current()
+    return {c.label(a): CATEGORICAL[i % len(CATEGORICAL)] for i, a in enumerate(c.segments)}
+
+
 HIGHLIGHT, MUTED, MUTED_2 = "#2a78d6", "#b4b2a9", "#d3d1c7"
 # Rampe séquentielle bleue (une teinte, clair -> foncé) pour la heatmap.
 SEQUENTIAL = ["#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#256abf", "#184f95", "#0d366b"]
@@ -49,7 +56,7 @@ def load_outputs() -> tuple[pd.DataFrame, pd.DataFrame, dict, dict | None, str]:
         incidents[col] = pd.to_numeric(incidents[col], errors="coerce").fillna(0.0)
     for col in ("theme_cause", "theme_consequence"):
         incidents[col] = incidents[col].fillna(F.UNCLASSIFIED)
-    incidents["type"] = incidents["asset_type"].map(ASSET_LABELS)
+    incidents["type"] = incidents["asset_type"].map(current().label)
     sheets_path = ANALYSIS / "fiches_causes.csv"
     sheets = pd.read_csv(sheets_path) if sheets_path.exists() else pd.DataFrame()
     decisions = json.loads((ANALYSIS / "decisions.json").read_text(encoding="utf-8"))
@@ -119,7 +126,7 @@ def fig_cost_by_site(incidents: pd.DataFrame) -> go.Figure:
     by_site = (incidents.groupby(["site", "type"])["estimated_cost_eur"].sum().reset_index()
                .sort_values("estimated_cost_eur", ascending=False))
     fig = px.bar(by_site, x="estimated_cost_eur", y="site", color="type", orientation="h",
-                 color_discrete_map=ASSET_COLORS, text=by_site["estimated_cost_eur"].map(euros),
+                 color_discrete_map=segment_colors(), text=by_site["estimated_cost_eur"].map(euros),
                  labels={"estimated_cost_eur": "Coût total (€)", "site": "", "type": "Type"})
     hbars(fig, list(by_site["site"]), by_site["estimated_cost_eur"])
     return layout(fig, 360, bargap=0.35)
@@ -127,7 +134,7 @@ def fig_cost_by_site(incidents: pd.DataFrame) -> go.Figure:
 
 def fig_risk_matrix(sheets: pd.DataFrame) -> go.Figure:
     """Une bulle par thème de cause : fréquence x coût moyen, taille = arrêt total, un panneau par type."""
-    fig = px.scatter(sheets.assign(type=sheets["asset_type"].map(ASSET_LABELS)),
+    fig = px.scatter(sheets.assign(type=sheets["asset_type"].map(current().label)),
                      x="incidents", y="cout_moyen", size="arret_total_h", color="criticite",
                      color_discrete_map=TIER_COLORS, category_orders={"criticite": TIERS}, facet_col="type",
                      hover_name="cause", size_max=30,
@@ -212,7 +219,7 @@ def fig_cause_sites(cause_incidents: pd.DataFrame) -> go.Figure:
 
 
 def fig_site_criteria(same_type: pd.DataFrame, site: str) -> go.Figure:
-    """Critères des profils (en %) : le site mis en avant face aux autres sites du même type."""
+    """Critères mesurés (en %) : le site mis en avant face aux autres sites du même segment."""
     indicators = F.profile_indicators(same_type)
     crit = pd.DataFrame([{"critère": c, "site": s, "valeur": v} for c, d in indicators.items() if d["unite"] == "%"
                          for s, v in d["valeurs"].items()])
@@ -220,7 +227,7 @@ def fig_site_criteria(same_type: pd.DataFrame, site: str) -> go.Figure:
     others = sorted(set(crit["site"]) - {site})
     fig = px.bar(crit, x="valeur", y="critère", color="site", orientation="h", barmode="group",
                  category_orders={"site": [site, *others]},
-                 color_discrete_map={site: HIGHLIGHT, **dict(zip(others, [MUTED, MUTED_2]))},
+                 color_discrete_map={site: HIGHLIGHT, **{o: (MUTED, MUTED_2)[i % 2] for i, o in enumerate(others)}},
                  labels={"valeur": "% des incidents du site", "critère": "", "site": "Site"})
     fig.update_traces(marker_line_width=0)
     fig.update_yaxes(categoryorder="array", categoryarray=list(dict.fromkeys(crit["critère"]))[::-1])

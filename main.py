@@ -1,19 +1,24 @@
 """Pipeline complète, étape par étape :
 
   1. pdf           extraction des rapports PDF (digitaux + scans OCR)  -> outputs/1_extraction/
+  1b. cadrage      listes fermées, segments, profils éventuels, déduits de context/contexte.md
+                   et d'un échantillon des données (LLM, vérifié par le code) -> outputs/1b_cadrage/
   2. analyse       agent d'analyse : clustering, causes, thèmes, profils de site, rapport
                                                                        -> outputs/2_analyse/
   3. verification  contrôles du code + agent vérificateur (avis)      -> outputs/3_verification/
   4. webapp        tableau de bord Streamlit (lecture seule des sorties, à lancer à la demande)
   5. export        rapport interactif en un fichier HTML autonome, à envoyer -> outputs/2_analyse/rapport_interactif.html
 
-Les étapes 2 et 3 appellent Azure OpenAI (il faut le .env). Chaque étape garde un cache dans
+Les agents ne savent du problème que ce que dit context/contexte.md (quelques lignes écrites par
+l'utilisateur) : tout le reste est déduit des données au cadrage. Le cadrage, l'analyse et la
+vérification appellent Azure OpenAI (il faut le .env). Chaque étape garde un cache dans
 outputs/cache/ : relancer ne refait que ce qui a changé, et une session d'agent déjà faite est
 rejouée à l'identique sans aucun appel. Organisation de outputs/ : voir paths.py.
 
 Usage :
     python main.py                          # toutes les étapes
     python main.py --steps analyse verification
+    python main.py --steps cadrage          # refaire le cadrage après avoir modifié context/contexte.md
     python main.py --steps verification     # revérifier sans refaire l'analyse
     python main.py --steps webapp           # ouvrir le tableau de bord
     python main.py --steps export           # fichier HTML à envoyer (s'ouvre sans Python)
@@ -29,13 +34,14 @@ import time
 from pathlib import Path
 
 from analysis_agent.pipeline import run as run_analysis
+from framing.pipeline import run as run_framing
 from paths import DATA_CSV, REVIEW_DIR
 from pdf_pipeline.pipeline import run as run_pdf
 from review_agent import config as review_config
 from review_agent.pipeline import run as run_review
 
-STEPS = ["pdf", "analyse", "verification", "export", "webapp"]
-DEFAULT_STEPS = ["pdf", "analyse", "verification", "export"]  # la webapp bloque le terminal : seulement sur demande
+STEPS = ["pdf", "cadrage", "analyse", "verification", "export", "webapp"]
+DEFAULT_STEPS = ["pdf", "cadrage", "analyse", "verification", "export"]  # la webapp bloque le terminal : seulement sur demande
 
 
 def main() -> None:
@@ -53,6 +59,8 @@ def main() -> None:
         start = time.time()
         if step == "pdf":
             run_pdf(args.csv)
+        elif step == "cadrage":
+            run_framing()
         elif step == "analyse":
             if not run_analysis(args.max_turns_analyse) and "verification" in args.steps:
                 print("La vérification va quand même tourner : elle signalera ce qui manque.")

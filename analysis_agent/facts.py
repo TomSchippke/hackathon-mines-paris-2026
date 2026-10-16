@@ -10,14 +10,16 @@ incident son thème de cause, son thème de conséquence et l'analyse du LLM.
 
 from __future__ import annotations
 
-import pandas as pd
-
 import itertools
 
+import pandas as pd
+
+from framing.cadrage import current
+from framing.config import AGE_CRITERION, MAINTENANCE_CRITERION
+
 from .config import (CRITICALITY_TIERS, DBCV_LABELS, DISTINCT_LARGE_GAP, DISTINCT_MIN_GAP, DISTINCT_RATIO,
-                     FLEET_PRIORITIES, MAINTENANCE_INDICATOR, MAINTENANCE_SUSPECT_LEVELS, NOMINAL_CONSEQUENCES,
-                     NOMINAL_SEVERITIES, PRIORITY_THRESHOLDS, PROFILE_CRITERIA, PROFILE_EXPECTATIONS, STABILITY_LABELS,
-                     TOP_PAIRS)
+                     FLEET_PRIORITIES, MAINTENANCE_INDICATOR, MAINTENANCE_SUSPECT_LEVELS, PRIORITY_THRESHOLDS,
+                     STABILITY_LABELS, TOP_PAIRS, UNDETERMINED)
 
 UNKNOWN = "Cause non précisée"      # thème des incidents dont la cause est inconnue (exclus du clustering)
 UNCERTAIN = "Cause incertaine"      # cause inférée avec une confiance faible (exclue, comptée à part)
@@ -26,10 +28,11 @@ NOT_A_CAUSE = {UNKNOWN, UNCERTAIN, UNCLASSIFIED}
 
 
 def nominal_stops(incidents: pd.DataFrame) -> pd.Series:
-    """Arrêts de sécurité nominaux : la protection a fonctionné, sans dommage (config.NOMINAL_*).
-    Ce n'est pas une cause à supprimer : exclus des plans et de la priorisation, présentés à part."""
-    return (incidents["categorie_consequence"].isin(NOMINAL_CONSEQUENCES)
-            & incidents["severity"].isin(NOMINAL_SEVERITIES))
+    """Arrêts de sécurité nominaux : la protection a fonctionné, sans dommage (catégorie de conséquence
+    marquée « fonctionnement normal » au cadrage, sévérité la plus faible). Ce n'est pas une cause à
+    supprimer : exclus des plans et de la priorisation, présentés à part."""
+    c = current()
+    return incidents["categorie_consequence"].isin(c.nominal_consequences) & (incidents["severity"] == c.mildest)
 
 
 def maintenance_suspected(incidents: pd.DataFrame) -> pd.Series:
@@ -56,21 +59,29 @@ def euros(x: float) -> str:
 # Critères des profils
 # ------------------------------------------------------------------------------------------------
 
+def severe_criterion() -> str:
+    return f"incidents « {current().most_severe} »"
+
+
 def profile_indicators(incidents: pd.DataFrame) -> dict[str, dict]:
-    """Critères des profils mesurés sur chaque site d'un même type :
+    """Critères mesurés sur chaque site d'un même segment : chaque facteur du cadrage (part des
+    incidents où il est facteur principal ou secondaire), les deux indicateurs de l'extraction, puis
+    des indicateurs secondaires (jamais critères d'un profil) :
     {critère: {"unite": "%" ou "€", "valeurs": {site: valeur}}}."""
+    c = current()
     by_site = incidents.groupby("site")
-    factors = incidents["facteur_principal"].fillna("") + " | " + incidents["facteurs_secondaires"].fillna("")
+    factors = (incidents["facteur_principal"].fillna("") + " | " + incidents["facteurs_secondaires"].fillna("")) \
+        .map(lambda f: {x.strip() for x in f.split("|")})
     flag = lambda col: incidents[col].astype(str).str.lower().isin(["true", "1"])
     out = {}
-    for criterion, names in PROFILE_CRITERIA.items():
-        hit = factors.apply(lambda f: any(n in f for n in names))
-        out[criterion] = 100 * hit.groupby(incidents["site"]).mean()
-    out["usure / vieillissement"] = 100 * flag("lie_vieillissement").groupby(incidents["site"]).mean()
-    out["lié à la maintenance"] = 100 * flag("lie_maintenance").groupby(incidents["site"]).mean()
-    if "maintenance_suspectee" in incidents:  # indicateur secondaire : absent de PROFILE_EXPECTATIONS
+    for criterion in c.factors:
+        if criterion != UNDETERMINED:
+            out[criterion] = 100 * factors.map(lambda f, n=criterion: n in f).groupby(incidents["site"]).mean()
+    out[AGE_CRITERION] = 100 * flag("lie_vieillissement").groupby(incidents["site"]).mean()
+    out[MAINTENANCE_CRITERION] = 100 * flag("lie_maintenance").groupby(incidents["site"]).mean()
+    if "maintenance_suspectee" in incidents:  # indicateur secondaire : jamais critère d'un profil
         out[MAINTENANCE_INDICATOR] = 100 * maintenance_suspected(incidents).groupby(incidents["site"]).mean()
-    out["incidents sévères"] = 100 * (incidents["severity"] == "sévère").groupby(incidents["site"]).mean()
+    out[severe_criterion()] = 100 * (incidents["severity"] == c.most_severe).groupby(incidents["site"]).mean()
     out["coût moyen par incident"] = by_site["estimated_cost_eur"].mean()
     return {c: {"unite": "€" if c.startswith("coût") else "%", "valeurs": {s: round(float(v), 1) for s, v in values.items()}}
             for c, values in out.items()}
@@ -121,22 +132,23 @@ def distinctive_points(indicators: dict[str, dict], site: str) -> list[dict]:
 
 
 def expectations_met(indicators: dict[str, dict], site: str, asset_type: str, profile: str) -> list[str]:
-    """Attentes du profil que le site vérifie nettement (config.PROFILE_EXPECTATIONS)."""
-    return [f"{criterion} {expected} ({reason})" for criterion, expected, reason in PROFILE_EXPECTATIONS[asset_type][profile]
-            if position(indicators, criterion, site) == expected]
+    """Attentes du profil (tirées du contexte au cadrage) que le site vérifie nettement."""
+    return [f"{criterion} {expected} ({reason})" for criterion, expected, reason in
+            current().expectations(asset_type)[profile]
+            if criterion in indicators and position(indicators, criterion, site) == expected]
 
 
 def profile_compatibility(indicators: dict[str, dict], asset_type: str) -> dict[str, dict[str, list[str]]]:
     """Pour chaque site et chaque profil : les attentes du profil vérifiées nettement par le site."""
     sites = sorted(next(iter(indicators.values()))["valeurs"])
-    return {site: {p: expectations_met(indicators, site, asset_type, p) for p in sorted(PROFILE_EXPECTATIONS[asset_type])}
+    return {site: {p: expectations_met(indicators, site, asset_type, p) for p in sorted(current().profiles(asset_type))}
             for site in sites}
 
 
 def best_assignments(indicators: dict[str, dict], asset_type: str) -> list[dict[str, str]]:
     """Attributions site -> profil qui respectent le plus d'attentes (plusieurs en cas d'égalité)."""
     compat = profile_compatibility(indicators, asset_type)
-    sites, profiles = sorted(compat), sorted(PROFILE_EXPECTATIONS[asset_type])
+    sites, profiles = sorted(compat), sorted(current().profiles(asset_type))
     scored = [(sum(len(compat[s][p]) for s, p in zip(sites, perm)), dict(zip(sites, perm)))
               for perm in itertools.permutations(profiles)]
     top = max(score for score, _ in scored)
@@ -156,7 +168,9 @@ def point_text(p: dict) -> str:
 def profile_gaps(indicators: dict[str, dict], site: str, asset_type: str, profile: str) -> list[str]:
     """Ce que le profil laisse attendre et que les mesures ne confirment pas."""
     gaps = []
-    for criterion, expected, reason in PROFILE_EXPECTATIONS[asset_type][profile]:
+    for criterion, expected, reason in current().expectations(asset_type)[profile]:
+        if criterion not in indicators:
+            continue
         d = indicators[criterion]
         values, unit = d["valeurs"], d["unite"]
         mine = values[site]
@@ -216,7 +230,7 @@ def priority_causes(site_incidents: pd.DataFrame, n: int = 3) -> list[dict]:
 def dominant_factor(incidents: pd.DataFrame, cause: str) -> str:
     """Facteur principal le plus fréquent parmi les incidents d'un thème de cause."""
     factors = incidents.loc[incidents["theme_cause"] == cause, "facteur_principal"].dropna()
-    factors = factors[factors != "indéterminé"]
+    factors = factors[factors != UNDETERMINED]
     return factors.mode().iat[0] if len(factors) else ""
 
 
@@ -259,7 +273,7 @@ def years(incidents: pd.DataFrame) -> float:
 
 
 def fleet_priorities(incidents: pd.DataFrame) -> pd.DataFrame:
-    """Interventions à l'échelle du parc : couples (site, cause connue) au plus fort coût observé. Le
+    """Interventions sur l'ensemble des sites : couples (site, cause connue) au plus fort coût observé. Le
     coût observé par an est la borne haute de ce qu'une action supprimant la cause économiserait."""
     known = incidents[~incidents["theme_cause"].isin(NOT_A_CAUSE) & ~nominal_stops(incidents)]
     stats = (known.groupby(["site", "theme_cause"])
@@ -334,7 +348,7 @@ def main_consequence(incidents: pd.DataFrame, cause: str) -> str:
 
 
 def cause_criticality(incidents: pd.DataFrame) -> pd.DataFrame:
-    """Criticité Pareto des thèmes de causes connues d'un type d'installation (arrêts nominaux exclus) :
+    """Criticité Pareto des thèmes de causes connues d'un segment (arrêts nominaux exclus) :
     rang par coût total, part cumulée du coût, niveau (config.CRITICALITY_TIERS)."""
     known = incidents[~incidents["theme_cause"].isin(NOT_A_CAUSE) & ~nominal_stops(incidents)].copy()
     known["suspect"] = maintenance_suspected(known) if "maintenance_suspectee" in known else False

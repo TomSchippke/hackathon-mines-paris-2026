@@ -1,4 +1,4 @@
-"""Paramètres de l'extraction des causes : catégories, prompt, parallélisme."""
+"""Paramètres de l'extraction des causes : prompt, schéma de réponse, parallélisme."""
 
 import re
 
@@ -6,48 +6,13 @@ import re
 # au-delà, erreurs 429 et attentes, gérées automatiquement mais plus lentes.
 WORKERS = 2
 
-# Facteur à l'origine de l'incident. Liste fermée : on peut compter et comparer les sites.
-# Elle reprend les facteurs qui distinguent les profils de site du sujet (environnement, climat,
-# âge, maintenance) et les causes techniques courantes.
-FACTEURS = [
-    "corrosion saline / embruns",
-    "foudre / orage",
-    "vent fort / tempête",
-    "grêle",
-    "chaleur / canicule",
-    "poussière / encrassement",
-    "nuisibles / animaux",
-    "sol / fondations",
-    "usure / vieillissement",
-    "défaut de fabrication",
-    "défaut ou retard de maintenance",
-    "travaux / erreur humaine",
-    "défaut électrique interne",
-    "indéterminé",
-]
+# Colonnes jamais montrées au LLM : le site et les identifiants qui le contiennent (voir pipeline.py),
+# et les colonnes techniques de l'extraction des PDF.
+PROMPT_EXCLUDED_COLUMNS = {"incident_id", "site", "text", "equipment_id", "technician_id", "document_path",
+                           "document_format", "extraction_method", "extraction_warnings"}
 
-COMPOSANTS = [
-    # PV
-    "module photovoltaïque", "onduleur", "câblage / connectique", "boîtier de jonction",
-    "structure / toiture / bâtiment",
-    # Éolien
-    "pale", "rotor / moyeu", "système de freinage", "transmission / multiplicateur", "nacelle",
-    "tour / fondations",
-    # Commun
-    "armoire / protection électrique", "système de contrôle / capteurs", "autre",
-]
-
-# Ce que l'incident a provoqué, en catégories fermées (normalisées) : comparables d'un site à l'autre.
-CATEGORIES_CONSEQUENCE = [
-    "perte de production",
-    "arrêt de sécurité automatique",
-    "déclenchement de protection / surtension",
-    "dégât matériel mineur",
-    "dégât matériel majeur / destruction",
-    "incendie",
-    "aucun impact notable",
-    "autre",
-]
+# Facteurs, composants et catégories de conséquence : listes fermées (on peut compter et comparer
+# les sites), définies au cadrage à partir du contexte et des données (framing/), jamais en dur ici.
 
 # Comment la cause a été obtenue : écrite dans le rapport, déduite d'indices du rapport, ou inconnue.
 CAUSE_TYPES = ["explicite", "inférée", "inconnue"]
@@ -70,30 +35,26 @@ UNKNOWN_CAUSE_PATTERN = re.compile(r"non (précis|determin|détermin|identifi|co
                                    r"pas (précis|indiqu|d'information)|aucune (cause|information|indication)",
                                    re.IGNORECASE)
 
-SYSTEM_PROMPT = f"""Tu es ingénieur fiabilité pour un exploitant de centrales photovoltaïques et de \
-parcs éoliens. On te donne un rapport d'incident. Analyse-le et réponds en JSON.
+SYSTEM_PROMPT = """Tu es ingénieur fiabilité. Contexte : {domaine} On te donne un rapport \
+d'incident. Analyse-le et réponds en JSON.
 
 - composant : le composant touché, parmi la liste imposée.
 - cause_racine : POURQUOI c'est arrivé, en une phrase courte, avec les mots du rapport. Remonte à la \
-cause première (« corrosion des connecteurs due aux embruns » plutôt que « court-circuit »). Ne \
-décris pas les dégâts ici.
-  Exemples : « une usure anormale du câblage en raison de rongement » -> « rongement du câblage \
-par des animaux » ; « salissure constatée sur plusieurs rangées de modules » -> « encrassement des \
-modules » ; « surtension pendant un épisode de tempête intense » -> « surtension provoquée par la \
-tempête » ; « départ de feu lors d'une opération de travaux » -> « travaux sur le site ».
+cause première, le phénomène qui a déclenché l'enchaînement, plutôt qu'au symptôme final (pas \
+« court-circuit » si le rapport dit ce qui l'a provoqué). Ne décris pas les dégâts ici.
 - cause_type :
   « explicite » si la DESCRIPTION écrit la cause ;
   « inférée » seulement si la description ne l'écrit pas mais contient un indice concret qui la \
-désigne (par exemple « après un épisode de vent extrême », « usure visible », « lors de travaux »). \
-La météo du jour seule ne suffit pas : l'indice doit être dans la description et lié à l'incident ;
-  « inconnue » dans tous les autres cas. Écris alors exactement « {CAUSE_INCONNUE} » dans \
-cause_racine, mets facteur_principal à « indéterminé » et laisse indice vide. En cas de doute, \
+désigne (par exemple « usure visible », « lors de travaux », un événement survenu juste avant). \
+Les conditions du jour seules (champs du rapport hors description) ne suffisent pas : l'indice doit \
+être dans la description et lié à l'incident ;
+  « inconnue » dans tous les autres cas. Écris alors exactement « {cause_inconnue} » dans \
+cause_racine, mets facteur_principal à « {indetermine} » et laisse indice vide. En cas de doute, \
 choisis « inconnue » : une cause inventée est pire qu'une cause inconnue.
 - indice : pour une cause explicite ou inférée, l'extrait de la description qui la justifie, \
 RECOPIÉ MOT POUR MOT (10 à 20 mots). Il sera vérifié : un extrait absent du rapport annule la cause.
-- consequence : CE QUE L'INCIDENT A PROVOQUÉ, en une phrase courte : dégât, arrêt, perte de \
-production, risque (par exemple « incendie de la toiture et arrêt de la centrale »). Ne répète \
-pas la cause ici, et n'indique ni durée ni montant.
+- consequence : CE QUE L'INCIDENT A PROVOQUÉ, en une phrase courte : dégât, arrêt, perte \
+d'activité, risque. Ne répète pas la cause ici, et n'indique ni durée ni montant.
 - categorie_consequence : la catégorie de cette conséquence, parmi la liste imposée.
 - facteur_principal : le facteur à l'origine de l'incident, parmi la liste imposée.
 - facteurs_secondaires : autres facteurs ayant contribué (liste vide si aucun).
@@ -103,48 +64,65 @@ maintenance (une simple intervention de réparation ne suffit pas).
 - maintenance_suspectee : même si le rapport ne le dit pas, un défaut de maintenance (inspection, \
 nettoyage, graissage, remplacement préventif manquant ou en retard) a-t-il pu laisser l'incident se \
 produire ou s'aggraver ? Raisonne à partir de la CONSÉQUENCE et de l'état constaté : dégradation \
-progressive qu'une inspection aurait repérée (encrassement accumulé, corrosion avancée, usure poussée, \
-nid ou rongement installé, desserrage, fuite ancienne) -> « plausible » ou « probable » ; événement \
-soudain et externe (foudre, grêle, tempête sur un équipement sain), défaut de fabrication ou erreur de \
-travaux -> « non ». « probable » seulement si l'état décrit montre une dégradation installée depuis \
-longtemps. Ce champ est une hypothèse : il ne change PAS cause_racine ni cause_type.
+progressive qu'une inspection aurait repérée (accumulation, corrosion avancée, usure poussée, \
+desserrage, fuite ancienne) -> « plausible » ou « probable » ; événement soudain et externe sur un \
+équipement sain, défaut de fabrication ou erreur de travaux -> « non ». « probable » seulement si \
+l'état décrit montre une dégradation installée depuis longtemps. Ce champ est une hypothèse : il ne \
+change PAS cause_racine ni cause_type.
 - justification_maintenance : une phrase qui justifie maintenance_suspectee (vide si « non »).
 - action_corrective : l'action concrète qui éviterait que l'incident se reproduise, en une phrase.
 - confiance : ta confiance dans la cause identifiée (« faible » si l'indice est ténu).
 
 Ne t'appuie que sur le rapport : n'invente pas de cause sans indice.
 
-Facteurs possibles : {", ".join(FACTEURS)}.
-Composants possibles : {", ".join(COMPOSANTS)}.
-Catégories de conséquence : {", ".join(CATEGORIES_CONSEQUENCE)}."""
+Facteurs possibles : {facteurs}.
+Composants possibles : {composants}.
+Catégories de conséquence : {consequences}."""
 
-RESPONSE_FORMAT = {
-    "type": "json_schema",
-    "json_schema": {
-        "name": "analyse_incident",
-        "strict": True,
-        "schema": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["composant", "cause_racine", "cause_type", "indice", "consequence", "categorie_consequence",
-                         "facteur_principal", "facteurs_secondaires", "lie_vieillissement", "lie_maintenance",
-                         "maintenance_suspectee", "justification_maintenance", "action_corrective", "confiance"],
-            "properties": {
-                "composant": {"type": "string", "enum": COMPOSANTS},
-                "cause_racine": {"type": "string"},
-                "cause_type": {"type": "string", "enum": CAUSE_TYPES},
-                "indice": {"type": "string"},
-                "consequence": {"type": "string"},
-                "categorie_consequence": {"type": "string", "enum": CATEGORIES_CONSEQUENCE},
-                "facteur_principal": {"type": "string", "enum": FACTEURS},
-                "facteurs_secondaires": {"type": "array", "items": {"type": "string", "enum": FACTEURS}},
-                "lie_vieillissement": {"type": "boolean"},
-                "lie_maintenance": {"type": "boolean"},
-                "maintenance_suspectee": {"type": "string", "enum": MAINTENANCE_SUSPECTEE},
-                "justification_maintenance": {"type": "string"},
-                "action_corrective": {"type": "string"},
-                "confiance": {"type": "string", "enum": CONFIANCE},
+FIELDS = ["composant", "cause_racine", "cause_type", "indice", "consequence", "categorie_consequence",
+          "facteur_principal", "facteurs_secondaires", "lie_vieillissement", "lie_maintenance",
+          "maintenance_suspectee", "justification_maintenance", "action_corrective", "confiance"]
+
+
+def system_prompt() -> str:
+    from framing.cadrage import current
+    from framing.config import UNDETERMINED
+
+    c = current()
+    return SYSTEM_PROMPT.format(domaine=c.domain, cause_inconnue=CAUSE_INCONNUE, indetermine=UNDETERMINED,
+                                facteurs=", ".join(c.factors), composants=", ".join(c.components),
+                                consequences=", ".join(c.consequences))
+
+
+def response_format() -> dict:
+    from framing.cadrage import current
+
+    c = current()
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "analyse_incident",
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": FIELDS,
+                "properties": {
+                    "composant": {"type": "string", "enum": c.components},
+                    "cause_racine": {"type": "string"},
+                    "cause_type": {"type": "string", "enum": CAUSE_TYPES},
+                    "indice": {"type": "string"},
+                    "consequence": {"type": "string"},
+                    "categorie_consequence": {"type": "string", "enum": c.consequences},
+                    "facteur_principal": {"type": "string", "enum": c.factors},
+                    "facteurs_secondaires": {"type": "array", "items": {"type": "string", "enum": c.factors}},
+                    "lie_vieillissement": {"type": "boolean"},
+                    "lie_maintenance": {"type": "boolean"},
+                    "maintenance_suspectee": {"type": "string", "enum": MAINTENANCE_SUSPECTEE},
+                    "justification_maintenance": {"type": "string"},
+                    "action_corrective": {"type": "string"},
+                    "confiance": {"type": "string", "enum": CONFIANCE},
+                },
             },
         },
-    },
-}
+    }

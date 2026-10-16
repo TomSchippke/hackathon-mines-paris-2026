@@ -1,6 +1,11 @@
 # Hackathon Mines Paris 2026 – Capgemini
 
-Pipeline agentique d'analyse des rapports d'incidents PV et éolien.
+Pipeline agentique d'analyse de rapports d'incidents, qui produit un rapport d'actions pour le client.
+
+Les agents ne savent **rien du problème a priori** : ils n'en connaissent que quelques lignes écrites
+par l'utilisateur dans [`context/contexte.md`](context/contexte.md). Tout le reste (facteurs à
+l'origine des incidents, composants, catégories de conséquences, profils de site éventuels, mesures
+préventives types) est déduit de ce texte et des données à l'étape de **cadrage** ([`framing/`](framing/README.md)).
 
 ## Données
 
@@ -32,11 +37,27 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+## Décrire le problème
+
+Écrire en quelques lignes, dans `context/contexte.md`, ce qu'il faut savoir du problème : qui est le
+client, quels sites, ce qu'on sait d'eux, l'objectif. Exemple fourni :
+
+```
+Le client exploite 6 sites de production d'énergie renouvelable : 3 centrales solaires
+photovoltaïques et 3 parcs éoliens. Les 3 sites d'un même type sont exposés à des conditions
+semblables. [...]
+```
+
+Pour que chaque site soit associé à un profil (plutôt que seulement caractérisé), décrire les profils
+dans ce même fichier (voir [`framing/README.md`](framing/README.md)). Après le cadrage, relire
+`outputs/1b_cadrage/cadrage.md` ; pour le corriger, copier `cadrage.json` en `context/cadrage.json`.
+
 ## Lancer la pipeline
 
 ```bash
 python main.py                                # toutes les étapes, l'une après l'autre
 python main.py --steps analyse verification   # seulement certaines étapes
+python main.py --steps cadrage                # refaire le cadrage après avoir modifié context/contexte.md
 python main.py --steps webapp                 # tableau de bord Streamlit (à la demande)
 python main.py --steps export                 # rapport interactif en un fichier HTML, à envoyer
 ```
@@ -49,10 +70,13 @@ toutes les fiches de causes, tous les plans par site).
 ```
  1. pdf            PDF + CSV ──> incidents_full.csv (1800 incidents complets)
                                      │
+ 1b. cadrage       context/contexte.md + échantillon des données ──> LLM ──> listes fermées, segments,
+                   profils éventuels, mesures types ; vérifiés par le code ──> cadrage.json (à relire)
+                                     │
  2. analyse        AGENT D'ANALYSE (LLM Azure) qui appelle des outils Python bornés :
                    extraction cause/conséquence (+ hypothèse « manque de maintenance »)
-                   ─> clustering + nommage/fusion des thèmes (×4 : PV/éolien × causes/conséquences)
-                   ─> heatmap causes × conséquences ─> chaînes prioritaires ─> profils
+                   ─> clustering + nommage/fusion des thèmes (par segment × causes/conséquences)
+                   ─> heatmap causes × conséquences ─> chaînes prioritaires ─> profils ou caractérisation
                    ─> rédaction : faits Python, reformulés par le LLM, vérifiés par un validateur
                    ─> fiches des causes (criticité Pareto) et plans par site
                    ─> juge : relit chaque texte, corrections acceptées seulement si validées
@@ -63,10 +87,11 @@ toutes les fiches de causes, tous les plans par site).
 | Étape | Module | Sortie |
 |---|---|---|
 | 1. `pdf` : extraction des PDF (digitaux + scans) | [`pdf_pipeline/`](pdf_pipeline/README.md) | `outputs/1_extraction/incidents_full.csv` |
+| 1b. `cadrage` : cadre d'analyse déduit du contexte et des données | [`framing/`](framing/README.md) | `outputs/1b_cadrage/cadrage.md` |
 | 2. `analyse` : workflow d'analyse (causes, conséquences, thèmes, profils, priorisation, rapport) | [`analysis_agent/`](analysis_agent/README.md) | `outputs/2_analyse/rapport_analyse.md` |
 | 3. `verification` : agent vérificateur | [`review_agent/`](review_agent/README.md) | `outputs/3_verification/verification.md` |
 | `export` : le même rapport en un fichier HTML autonome, à envoyer | [`webapp/export_html.py`](webapp/export_html.py) | `outputs/2_analyse/rapport_interactif.html` |
-| 4. `webapp` : **le rapport en version interactive** (synthèse exécutive, heatmap, Pareto et fiches diagnostic, profils et plans par site, explorateur + vérification) | [`webapp/app.py`](webapp/app.py) | Streamlit, lecture seule des sorties |
+| 4. `webapp` : **le rapport en version interactive** (synthèse exécutive, heatmap, Pareto et fiches diagnostic, sites et plans d'actions, explorateur + vérification) | [`webapp/app.py`](webapp/app.py) | Streamlit, lecture seule des sorties |
 
 Cette branche (`branch-octave-tom-merged`) réunit le workflow de Tom (extraction cause/conséquence,
 4 clusterings, agent aux outils bornés, rédaction validée, juge, vérificateur) et les idées de la

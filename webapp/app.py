@@ -27,9 +27,10 @@ from figures import (F, HIGHLIGHT, METRICS, TIER_COLORS, TIERS, VERDICTS, Missin
                      euros, fig_cause_consequences, fig_cause_sites, fig_chains, fig_cost_by_site, fig_fleet,
                      fig_heatmap, fig_pareto, fig_risk_matrix, fig_site_causes, fig_site_criteria, fleet_table,
                      load_outputs)
-from analysis_agent.config import ASSET_LABELS, ASSET_TYPES, MAINTENANCE_INDICATOR, SITE_PROFILES  # noqa: E402
+from analysis_agent.config import MAINTENANCE_INDICATOR  # noqa: E402
+from framing.cadrage import current  # noqa: E402
 
-st.set_page_config(page_title="Incidents PV & éolien | Rapport interactif", page_icon="⚡", layout="wide",
+st.set_page_config(page_title="Incidents | Rapport interactif", page_icon="⚡", layout="wide",
                    initial_sidebar_state="expanded")
 
 
@@ -43,7 +44,7 @@ def load() -> tuple[pd.DataFrame, pd.DataFrame, dict, dict | None, str]:
 
 
 def asset_picker(key: str) -> str:
-    return st.radio("Type d'installation", ASSET_TYPES, format_func=lambda a: ASSET_LABELS[a].capitalize(),
+    return st.radio("Segment", current().segments, format_func=lambda a: current().label(a).capitalize(),
                     horizontal=True, key=key)
 
 
@@ -81,7 +82,7 @@ def sidebar(incidents: pd.DataFrame, sheets: pd.DataFrame, review: dict | None, 
 
 def tab_executive(incidents: pd.DataFrame, sheets: pd.DataFrame, decisions: dict) -> None:
     report = decisions.get("rapport") or {}
-    st.subheader("Vue d'ensemble du parc")
+    st.subheader("Vue d'ensemble des sites")
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Incidents", f"{len(incidents):,}".replace(",", " "))
     c2.metric("Impact financier", euros(incidents["estimated_cost_eur"].sum()))
@@ -101,7 +102,7 @@ def tab_executive(incidents: pd.DataFrame, sheets: pd.DataFrame, decisions: dict
             st.plotly_chart(fig_risk_matrix(sheets), width="stretch")
             st.caption("Une bulle par thème de cause ; taille = arrêt total. En haut à droite : fréquent ET cher.")
 
-    st.markdown("#### Priorités du parc")
+    st.markdown("#### Priorités sur l'ensemble des sites")
     st.caption("Couples (site, cause connue) au plus fort coût, hors arrêts de sécurité nominaux. Le coût par an "
                "est la borne haute de l'économie possible si la mesure supprime la cause.")
     fleet = fleet_table(incidents, decisions)
@@ -240,6 +241,12 @@ def incident_reader(r: pd.Series) -> None:
 # Onglet 4 : profils et plans par site
 # ------------------------------------------------------------------------------------------------
 
+def site_title(s: dict) -> str:
+    if not s["profil"]:
+        return s["site"]
+    return f"{s['site']} — profil {s['profil']}{' (par élimination)' if s.get('par_elimination') else ''}"
+
+
 def tab_sites(incidents: pd.DataFrame, decisions: dict) -> None:
     sites = (decisions.get("rapport") or {}).get("sites", [])
     if not sites:
@@ -253,8 +260,9 @@ def tab_sites(incidents: pd.DataFrame, decisions: dict) -> None:
 
     st.markdown(f"""<div style="padding:16px 18px;border-radius:8px;border-left:6px solid {HIGHLIGHT};
         background-color:rgba(128,128,128,0.08);margin-bottom:16px;">
-        <h3 style="margin-top:0;">{site} — profil {s['profil']}{' (par élimination)' if s.get('par_elimination') else ''}</h3>
-        <span style="opacity:0.8;">{SITE_PROFILES[asset_type][s['profil']]}</span></div>""", unsafe_allow_html=True)
+        <h3 style="margin-top:0;">{site_title(s)}</h3>
+        <span style="opacity:0.8;">{current().profiles(asset_type).get(s['profil'], current().label(asset_type))}</span>
+        </div>""", unsafe_allow_html=True)
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Incidents", len(g))
     c2.metric("Coût total", euros(g["estimated_cost_eur"].sum()))
@@ -262,12 +270,12 @@ def tab_sites(incidents: pd.DataFrame, decisions: dict) -> None:
     if "maintenance_suspectee" in g:
         c4.metric("Maintenance suspectée", f"{F.share(int((g['maintenance_suspectee'] == 'probable').sum()), len(g))} %",
                   help="Hypothèse du LLM d'après la conséquence ; indicateur secondaire, hors attribution des profils.")
-    st.markdown(f"**Pourquoi ce profil :** {s['justification_profil']}")
+    st.markdown(f"**{'Pourquoi ce profil' if s['profil'] else 'Ce qui distingue ce site'} :** {s['justification_profil']}")
     st.markdown(f"**Causes dominantes :** {s['causes_dominantes']}")
 
     left, right = st.columns(2)
     with left:
-        st.markdown("##### Critères des profils : ce site face aux autres")
+        st.markdown("##### Critères mesurés : ce site face aux autres")
         st.plotly_chart(fig_site_criteria(same_type, site), width="stretch")
         st.caption(f"« {MAINTENANCE_INDICATOR} » est un indicateur secondaire : il n'entre pas dans l'attribution.")
     with right:
@@ -296,7 +304,7 @@ def tab_explorer(incidents: pd.DataFrame, review: dict | None) -> None:
     st.subheader("Explorateur & recherche d'incidents")
     c1, c2, c3, c4 = st.columns(4)
     query = c1.text_input("🔎 Recherche dans les rapports")
-    assets = c2.multiselect("Type", ASSET_TYPES, default=ASSET_TYPES, format_func=lambda a: ASSET_LABELS[a])
+    assets = c2.multiselect("Segment", current().segments, default=current().segments, format_func=current().label)
     sites = c3.multiselect("Site", sorted(incidents["site"].unique()))
     types = c4.multiselect("Type de cause", sorted(incidents["cause_type"].dropna().unique()))
     df = incidents[incidents["asset_type"].isin(assets)]
@@ -341,11 +349,12 @@ def tab_explorer(incidents: pd.DataFrame, review: dict | None) -> None:
 def main() -> None:
     incidents, sheets, decisions, review, report_md = load()
     sidebar(incidents, sheets, review, report_md)
-    st.title("Rapport d'analyse des incidents PV & éolien")
+    st.title("Rapport d'analyse des incidents")
+    st.caption(current().domain)
     st.markdown("Causes et conséquences de chaque incident extraites par le LLM, regroupées en thèmes par l'agent, "
                 "croisées dans une heatmap et priorisées par coût : de la synthèse au plan d'actions par site.")
     tabs = st.tabs(["📊 Synthèse exécutive", "🔥 Heatmap causes × conséquences", "🔍 Pareto & fiches diagnostic",
-                    "🏭 Profils & plans par site", "📋 Explorateur & vérification"])
+                    "🏭 Sites & plans d'actions", "📋 Explorateur & vérification"])
     with tabs[0]:
         tab_executive(incidents, sheets, decisions)
     with tabs[1]:

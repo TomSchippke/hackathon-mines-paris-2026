@@ -25,6 +25,7 @@ import pandas as pd
 
 from analysis_agent.report import md_table
 from analysis_agent.facts import profile_indicators, rank_text
+from framing.cadrage import current
 from llm.agent import dispatch, journal_markdown, run_agent
 from paths import ANALYSIS_DIR, REVIEW_DIR
 
@@ -74,12 +75,14 @@ def run(max_turns: int = MAX_TURNS) -> str:
                 + "\n\nRAPPORT À VÉRIFIER :\n" + ws.report_md
                 + "\n\nCHIFFRES RECALCULÉS PAR SITE (à comparer au rapport) :\n"
                 + json.dumps(facts, ensure_ascii=False, default=str)
-                + "\n\nINDICATEURS DES PROFILS (critères du sujet mesurés sur chaque site, rang parmi les 3 "
-                  "sites du même type, 1 = le plus élevé) :\n" + json.dumps(indicators, ensure_ascii=False)
+                + "\n\nCRITÈRES MESURÉS SUR CHAQUE SITE (rang parmi les sites du même segment, 1 = le plus "
+                  "élevé) :\n" + json.dumps(indicators, ensure_ascii=False)
+                + ("\n\nPROFILS DU CONTEXTE :\n" + json.dumps({a: current().profiles(a) for a in current().profiled_segments},
+                                                               ensure_ascii=False) if current().profiled_segments else "")
                 + f"\n\nLe journal de l'agent d'analyse contient {len(ws.journal)} événements (read_journal). "
                   "Vérifie, consigne chaque problème avec record_finding, puis appelle conclude.")
         tools = [t for t in TOOLS if t["function"]["name"] != "read_report"]
-        journal, _ = run_agent(SYSTEM_PROMPT, task, tools, lambda name, args: dispatch(ws.tools, name, args),
+        journal, _ = run_agent(SYSTEM_PROMPT.format(domaine=current().domain), task, tools, lambda name, args: dispatch(ws.tools, name, args),
                                is_done=lambda: ws.verdict is not None, max_turns=max_turns, role="review",
                                nudge=lambda: (f"Consigne encore un point pour : {ws.uncovered()}, puis appelle conclude."
                                               if ws.uncovered() else "Appelle conclude."))

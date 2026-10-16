@@ -28,7 +28,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from figures import (ANALYSIS, F, TIER_COLORS, VERDICTS, chains_frame, euros,  # noqa: E402
                      fig_cause_consequences, fig_cause_sites, fig_chains, fig_cost_by_site, fig_fleet, fig_heatmap,
                      fig_pareto, fig_risk_matrix, fig_site_causes, fig_site_criteria, fleet_table, load_outputs)
-from analysis_agent.config import ASSET_LABELS, ASSET_TYPES, MAINTENANCE_INDICATOR, SITE_PROFILES  # noqa: E402
+from analysis_agent.config import MAINTENANCE_INDICATOR  # noqa: E402
+from framing.cadrage import current  # noqa: E402
 
 OUTPUT = ANALYSIS / "rapport_interactif.html"
 PLOT_CONFIG = {"displaylogo": False, "responsive": True,
@@ -139,7 +140,7 @@ def section_overview(incidents, sheets, decisions) -> str:
 <div class="grid2"><div class="card"><h3>Coût par site</h3>{chart(fig_cost_by_site(incidents))}</div>
 <div class="card"><h3>Matrice de risque des causes</h3>{chart(fig_risk_matrix(sheets)) if len(sheets) else ""}
 <p class="note">Une bulle par thème de cause ; taille = arrêt total. En haut à droite : fréquent ET cher.</p></div></div>
-<div class="card"><h3>Priorités du parc</h3><p class="note">Couples (site, cause connue) au plus fort coût, hors arrêts de
+<div class="card"><h3>Priorités sur l'ensemble des sites</h3><p class="note">Couples (site, cause connue) au plus fort coût, hors arrêts de
 sécurité nominaux. Le coût par an est la borne haute de l'économie possible si la mesure supprime la cause.</p>
 {chart(fig_fleet(fleet))}{table(shown[["site", "cause", "incidents", "coût total", "coût par an", "mesure préventive"]])}</div>
 </section>"""
@@ -149,9 +150,9 @@ def section_heatmap(incidents, decisions) -> str:
     parts = ['<section id="heatmap"><h2>Heatmap causes × conséquences</h2><p class="note">Causes connues seulement ; '
              "arrêts de sécurité nominaux exclus. Couleur = coût total, chiffre = nombre d'incidents. Survolez une "
              "case pour le détail.</p>"]
-    for asset_type in ASSET_TYPES:
+    for asset_type in current().segments:
         sub = incidents[incidents["asset_type"] == asset_type]
-        parts.append(f'<div class="card"><h3>{esc(ASSET_LABELS[asset_type].capitalize())} — tous les sites</h3>'
+        parts.append(f'<div class="card"><h3>{esc(current().label(asset_type).capitalize())} — tous les sites</h3>'
                      f"{chart(fig_heatmap(sub))}")
         choice = (decisions.get("chaines_prioritaires") or {}).get(asset_type)
         if choice:
@@ -171,11 +172,11 @@ def section_sheets(incidents, sheets) -> str:
     parts = ['<section id="fiches"><h2>Pareto & fiches diagnostic des causes</h2><p class="note">Thèmes de causes connues '
              "triés par coût total (arrêts nominaux exclus). Criticité : part cumulée du coût ≤ 70 % critique, ≤ 90 % "
              "élevée, ≤ 98 % moyenne, sinon faible. Maintenance suspectée : hypothèse du LLM d'après la conséquence.</p>"]
-    for asset_type in ASSET_TYPES:
+    for asset_type in current().segments:
         sub = sheets[sheets["asset_type"] == asset_type].sort_values("rang")
         if sub.empty:
             continue
-        parts.append(f'<div class="card"><h3>{esc(ASSET_LABELS[asset_type].capitalize())}</h3>{chart(fig_pareto(sub))}</div>')
+        parts.append(f'<div class="card"><h3>{esc(current().label(asset_type).capitalize())}</h3>{chart(fig_pareto(sub))}</div>')
         for f in sub.itertuples():
             g = incidents[(incidents["asset_type"] == asset_type) & (incidents["theme_cause"] == f.cause)]
             body = (f'<p>{badge(f.criticite)} <span class="note">Facteur dominant : {esc(f.facteur or "non précisé")} · '
@@ -197,7 +198,7 @@ def section_sheets(incidents, sheets) -> str:
 
 def section_sites(incidents, decisions) -> str:
     sites = (decisions.get("rapport") or {}).get("sites", [])
-    parts = ['<section id="sites"><h2>Profils & plans par site</h2><p class="note">Plans : mesures préventives pour les '
+    parts = ['<section id="sites"><h2>Sites & plans d’actions</h2><p class="note">Plans : mesures préventives pour les '
              "causes connues les plus coûteuses du site, hors arrêts de sécurité nominaux ; priorité selon leur part du "
              f"coût du site (≥ 25 % haute, ≥ 10 % moyenne). « {esc(MAINTENANCE_INDICATOR)} » est un indicateur "
              "secondaire : il n'entre pas dans l'attribution des profils.</p>"]
@@ -210,17 +211,21 @@ def section_sites(incidents, decisions) -> str:
             f'<em>{esc(str(p["type"]).capitalize())} :</em> {esc(p["action"])}<br><em>Mécanisme :</em> {esc(p["mecanisme"])}</div>'
             f'<div class="cost"><div class="note">Priorité {esc(p["priorite"])}</div><div class="value">{euros(p["cout_total"])}</div>'
             f'<div class="note">{p["part_cout_pct"]} % du coût du site</div></div></div>' for p in s["plan"])
-        body = (f'<p class="note">Profil {esc(s["profil"])} : {esc(SITE_PROFILES[asset_type][s["profil"]])}</p>'
-                f'<div class="kpis">{kpi("Incidents", str(len(g)))}{kpi("Coût total", euros(g["estimated_cost_eur"].sum()))}'
+        profile = current().profiles(asset_type).get(s["profil"]) if s["profil"] else None
+        intro = (f'<p class="note">Profil {esc(s["profil"])} : {esc(profile)}</p>' if profile else
+                 f'<p class="note">{esc(current().label(asset_type).capitalize())}</p>')
+        body = (intro
+                + f'<div class="kpis">{kpi("Incidents", str(len(g)))}{kpi("Coût total", euros(g["estimated_cost_eur"].sum()))}'
                 f'{kpi("Causes non précisées", f"{F.unknown_share(g)} %")}{kpi("Maintenance suspectée", f"{suspected} %")}</div>'
-                f'<p><strong>Pourquoi ce profil :</strong> {esc(s["justification_profil"])}</p>'
+                f'<p><strong>{"Pourquoi ce profil" if s["profil"] else "Ce qui distingue ce site"} :</strong> '
+                f'{esc(s["justification_profil"])}</p>'
                 f'<p><strong>Causes dominantes :</strong> {esc(s["causes_dominantes"])}</p>'
-                f'<div class="grid2"><div><h4>Critères des profils : ce site face aux autres</h4>'
+                f'<div class="grid2"><div><h4>Critères mesurés : ce site face aux autres</h4>'
                 f'{chart(fig_site_criteria(incidents[incidents["asset_type"] == asset_type], s["site"]))}</div>'
                 f'<div><h4>Causes du site</h4>{chart(fig_site_causes(g))}</div></div>'
                 f"<h4>Plan de remédiation</h4>{plans}")
-        summary = (f'{esc(s["site"])} — profil {esc(s["profil"])}{" (par élimination)" if s.get("par_elimination") else ""}'
-                   f' · {euros(g["estimated_cost_eur"].sum())}')
+        summary = (esc(s["site"]) + (f' — profil {esc(s["profil"])}' if s["profil"] else "")
+                   + (" (par élimination)" if s.get("par_elimination") else "") + f' · {euros(g["estimated_cost_eur"].sum())}')
         parts.append(details(summary, body))
     return "".join(parts) + "</section>"
 
@@ -250,14 +255,15 @@ def build() -> Path:
                     section_sheets(incidents, sheets), section_sites(incidents, decisions), section_review(review, report_md)])
     page = f"""<!doctype html>
 <html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Rapport incidents PV & éolien</title><style>{CSS}</style>
+<title>Rapport d'analyse des incidents</title><style>{CSS}</style>
 <script>{get_plotlyjs()}</script></head>
-<body><header><h1>Rapport d'analyse des incidents PV & éolien</h1>
+<body><header><h1>Rapport d'analyse des incidents</h1>
+<p>{esc(current().domain)}</p>
 <p>Rapport interactif généré le {date.today():%d/%m/%Y} à partir des sorties de la pipeline. Causes et conséquences
 extraites par le LLM, regroupées en thèmes par l'agent, croisées dans une heatmap et priorisées par coût. Tous les
 chiffres sont calculés à partir des données ; les textes du LLM ont été validés puis relus par un juge.</p></header>
 <nav><a href="#synthese">Synthèse</a><a href="#heatmap">Heatmap</a><a href="#fiches">Pareto & fiches</a>
-<a href="#sites">Profils & plans</a><a href="#verification">Vérification</a></nav>
+<a href="#sites">Sites & plans</a><a href="#verification">Vérification</a></nav>
 <main>{body}</main>
 <footer>Graphiques interactifs : survol pour le détail, glisser pour zoomer, double-clic pour revenir, clic sur la
 légende pour masquer une série.</footer>
