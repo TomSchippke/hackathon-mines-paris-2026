@@ -19,6 +19,7 @@ from .config import (
     SEVERITY_COL,
     SITE_COL,
     TECHNICIAN_COL,
+    TOP_SEVERITY,
 )
 
 
@@ -58,9 +59,12 @@ def compute_equipment_metrics(
             rec_counts[f"recurrences_{w}d"] = cnt
             rec_rates[f"recurrence_rate_{w}d"] = round(cnt / opportunity_count * 100, 1)
 
-        crit_count = 0
+        # Incidents au niveau de sévérité le plus élevé
+        severe_count = 0
         if SEVERITY_COL in group.columns:
-            crit_count = int((group[SEVERITY_COL].astype(str).str.lower() == "critique").sum())
+            severe_count = int(
+                (group[SEVERITY_COL].astype(str).str.lower().str.strip() == TOP_SEVERITY.lower()).sum()
+            )
 
         unique_techs = 0
         top_tech = "N/A"
@@ -91,7 +95,7 @@ def compute_equipment_metrics(
             "mtbf_days": round(mtbf_days, 1),
             "median_days_between_incidents": round(median_delay, 1),
             "min_days_between_incidents": round(min_delay, 1),
-            "critical_incidents": crit_count,
+            "severe_incidents": severe_count,
             "unique_technicians": unique_techs,
             "most_frequent_technician": top_tech,
             "most_frequent_problem": top_problem,

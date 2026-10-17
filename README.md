@@ -35,19 +35,39 @@ pip install -r requirements.txt
 ## Lancer la pipeline
 
 ```bash
-python main.py                    # toutes les étapes, l'une après l'autre
-python main.py --steps topics     # une seule étape
+python main.py                              # étapes par défaut : pdf, segmentation, equipment
+python main.py --steps segmentation         # une seule étape
+python main.py --steps topics               # topic modeling exploratoire (optionnel)
 ```
 
-| Étape | Module | Sortie |
-|---|---|---|
-| 1. `pdf` : extraction des PDF (digitaux + scans) | [`pdf_pipeline/`](pdf_pipeline/README.md) | `outputs/incidents_full.csv` |
-| 2. `topics` : topic modeling BERTopic sur les 1800 incidents | [`topic_modeling/`](topic_modeling/README.md) | `outputs/topics/` |
-| 3. `segmentation` : segmentation causale & criticité LLM | [`agentic_pipeline/`](agentic_pipeline/) | `outputs/segmentation/` |
-| 4. `equipment` : chronologies pannes & audit techniciens | [`equipment_analysis/`](equipment_analysis/) | `outputs/equipment/` |
-| 5. `webapp` : tableau de bord interactif Streamlit | [`webapp/`](webapp/) | `streamlit run webapp/app.py` |
+| Étape | Module | Sortie | Défaut |
+|---|---|---|---|
+| 1. `pdf` : extraction des PDF (digitaux + scans) | [`pdf_pipeline/`](pdf_pipeline/README.md) | `outputs/incidents_full.csv` | oui |
+| 2. `segmentation` : clustering agentique (modes de défaillance, remédiations, concentration, précurseurs, diagnostic) | [`agentic_pipeline/`](agentic_pipeline/README.md) | `outputs/segmentation/` | oui |
+| 3. `equipment` : chronologies pannes & audit techniciens | [`equipment_analysis/`](equipment_analysis/) | `outputs/equipment/` | oui |
+| 4. `webapp` : tableau de bord interactif Streamlit | [`webapp/`](webapp/) | `streamlit run webapp/app.py` | non |
+| `topics` : topic modeling BERTopic sur les 1800 incidents (exploratoire, non utilisé par le rapport) | [`topic_modeling/`](topic_modeling/README.md) | `outputs/topics/` | non |
+
+Sorties de l'étape `segmentation` (`outputs/segmentation/`) :
+
+| Fichier | Contenu |
+|---|---|
+| `incidents_segmented.csv` | un incident par ligne, avec `fine_cluster_id`, `merged_cluster_id`, `cluster_id` (= `merged_cluster_id`), diagnostic et criticité |
+| `clusters_fine.csv` | modes de défaillance (clusters fins) |
+| `clusters_merged.csv` | voies de remédiation (clusters fusionnés), triés par criticité ; remplace l'ancien `clusters_summary.csv` |
+| `merge_log.json` | journal auditable de l'agent de fusion |
+| `concentration.csv` | concentration par site, équipement et trimestre pour chaque cluster fusionné |
+| `precursor_pairs.csv` | paires précurseur / récurrence / escalade, avec lift, q-value et règle de surveillance |
+| `precursor_evidence.csv` | incidents concernés par chaque règle précurseur |
+| `fine_sweep.csv` | balayage HDBSCAN par partition (DBCV, taux d'isolés) |
 
 Chaque étape garde un cache dans `outputs/cache/` : relancer ne refait que ce qui a changé.
+
+Tests unitaires et de non-régression (sans appel réseau ni LLM) :
+
+```bash
+.venv/bin/python -m pytest tests -q
+```
 
 ## Extraction des PDF (digitaux + scans)
 

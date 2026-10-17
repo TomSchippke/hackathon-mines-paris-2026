@@ -1,348 +1,440 @@
-"""Pipeline agentique de segmentation, diagnostic de causes et évaluation de criticité."""
+"""Pipeline agentique v2 : clusters fins -> clusters de remédiation -> concentration, précurseurs, diagnostic.
+
+Étapes : chargement (schéma fixe) ; par partition : embeddings, UMAP, balayage HDBSCAN (DBCV),
+étiquetage des clusters fins, reclassement des outliers, agent de fusion ; concentration ;
+précurseurs (niveau fusionné) + escalades (niveau fin) ; contrôle de plausibilité ; preuves ;
+diagnostic final ; criticité ; écriture des fichiers (§3.4 du plan).
+"""
 
 from __future__ import annotations
 
 import argparse
-import sys
+import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
-from tqdm import tqdm
 
-from .agent import diagnose_cluster, reassign_outliers_batch
-from .clustering import (
-    cluster_texts,
-    extract_ctfidf_keywords,
-    get_cluster_metadata_profile,
-    select_representative_documents,
-)
+from . import clustering, llm_client
+from .agent import reassign_outliers_batch
+from .concentration import compute_concentration
 from .config import (
     COST_COL,
     DATE_COL,
     DEFAULT_INPUT,
     DEFAULT_OUT_DIR,
-    DEFAULT_SPLIT_COL,
     DOWNTIME_COL,
+    EQUIPMENT_COL,
     FALLBACK_INPUT,
     ID_COL,
-    MIN_CLUSTER_SIZE,
+    MCS_SWEEP,
     OUTLIER_BATCH_SIZE,
+    OUTLIER_LABEL,
+    PARTITION_COL,
+    PRECURSOR_N_PERMUTATIONS,
+    SEVERITY_COL,
     TEXT_COL,
 )
 from .criticality import compute_cluster_criticality
+from .diagnosis import build_diagnosis_context, diagnose_merged_cluster
+from .labeling import build_fine_cards, label_fine_clusters
+from .merging import FineState, run_merge_agent
+from .precursor_agent import check_plausibility
+from .precursors import EVIDENCE_COLUMNS, PAIR_COLUMNS, extract_evidence, mine_escalations, mine_precursors
+
+REQUIRED_COLUMNS = [
+    ID_COL, TEXT_COL, DATE_COL, EQUIPMENT_COL, "site", PARTITION_COL,
+    SEVERITY_COL, COST_COL, DOWNTIME_COL,
+]
+MERGED_COL = "merged_cluster_id"
+FINE_COL = "fine_cluster_id"
+CONCENTRATION_COLUMNS = [
+    MERGED_COL, "dimension", "value", "observed", "expected", "lift", "p_value", "q_value", "significant",
+]
+JSON_LIST_COLS = ["fine_cluster_ids", "prevented_outcomes", "recommendations", "early_warning_rules"]
+
+OUTLIER_DIAGNOSIS = {
+    "problem_title": "Incidents isolés et anomalies atypiques",
+    "problem_description": "Ensemble d'incidents singuliers ne correspondant à aucun cluster récurrent établi.",
+    "common_cause": "Origines variées et non récurrentes (facteurs externes exceptionnels, signaux faibles).",
+    "system_impact": "Impacts ponctuels sans tendance systémique identifiée.",
+    "prevented_outcomes": [],
+    "recommendations": [
+        {
+            "action": "Maintien d'une veille opérationnelle et traitement au cas par cas.",
+            "scope": "fleet",
+            "targets": [],
+            "rationale": "Aucune récurrence exploitable.",
+        }
+    ],
+    "early_warning_rules": [],
+}
 
 
-def validate_and_detect_columns(
-    df: pd.DataFrame,
-    text_col: str = TEXT_COL,
-    cost_col: str = COST_COL,
-    downtime_col: str = DOWNTIME_COL,
-    date_col: str = DATE_COL,
-    id_col: str = ID_COL,
-) -> dict[str, str]:
-    """Valide les colonnes requises avec détection intelligente de secours."""
-    detected = {}
+# --------------------------------------------------------------------------- chargement
 
-    # 1. Colonne texte
-    if text_col in df.columns:
-        detected["text"] = text_col
-    else:
-        text_candidates = [c for c in df.columns if any(k in c.lower() for k in ["text", "desc", "rapport", "detail", "summary"])]
-        if text_candidates:
-            detected["text"] = text_candidates[0]
-            print(f"[Auto-détection] Colonne texte identifiée : '{detected['text']}'")
-        else:
-            raise ValueError(f"Impossible de trouver une colonne texte dans le dataset. Colonnes : {list(df.columns)}")
 
-    # 2. Colonne coût
-    if cost_col in df.columns:
-        detected["cost"] = cost_col
-    else:
-        cost_candidates = [c for c in df.columns if any(k in c.lower() for k in ["cost", "cout", "coût", "eur", "montant", "price"])]
-        if cost_candidates:
-            detected["cost"] = cost_candidates[0]
-            print(f"[Auto-détection] Colonne coût identifiée : '{detected['cost']}'")
-        else:
-            raise ValueError(f"Impossible de trouver une colonne coût dans le dataset. Colonnes : {list(df.columns)}")
+def _resolve_input(input_csv: Path | None) -> Path:
+    if input_csv is not None:
+        return Path(input_csv)
+    for cand in (DEFAULT_INPUT, FALLBACK_INPUT):
+        if cand.exists():
+            return cand
+    raise FileNotFoundError(f"Fichier d'entrée introuvable ({DEFAULT_INPUT} ou {FALLBACK_INPUT}).")
 
-    # 3. Colonne durée / downtime
-    if downtime_col in df.columns:
-        detected["downtime"] = downtime_col
-    else:
-        downtime_candidates = [c for c in df.columns if any(k in c.lower() for k in ["downtime", "duree", "durée", "hours", "heure"])]
-        detected["downtime"] = downtime_candidates[0] if downtime_candidates else ""
-        if detected["downtime"]:
-            print(f"[Auto-détection] Colonne durée identifiée : '{detected['downtime']}'")
 
-    # 4. Colonne date
-    if date_col in df.columns:
-        detected["date"] = date_col
-    else:
-        date_candidates = [c for c in df.columns if any(k in c.lower() for k in ["date", "time", "timestamp", "jour"])]
-        detected["date"] = date_candidates[0] if date_candidates else ""
-        if detected["date"]:
-            print(f"[Auto-détection] Colonne date identifiée : '{detected['date']}'")
+def _load_incidents(input_csv: Path) -> pd.DataFrame:
+    """Charge le CSV (schéma fixe), vérifie les colonnes, retire les textes vides, force les numériques."""
+    df = pd.read_csv(input_csv)
+    missing = [c for c in REQUIRED_COLUMNS if c not in df.columns]
+    if missing:
+        raise ValueError(
+            f"Colonnes obligatoires absentes de {input_csv} : {missing}. "
+            f"Colonnes présentes : {list(df.columns)}"
+        )
+    df = df[df[TEXT_COL].notna() & (df[TEXT_COL].astype(str).str.strip() != "")].copy()
+    df[COST_COL] = pd.to_numeric(df[COST_COL], errors="coerce").fillna(0.0)
+    df[DOWNTIME_COL] = pd.to_numeric(df[DOWNTIME_COL], errors="coerce").fillna(0.0)
+    df[PARTITION_COL] = df[PARTITION_COL].fillna("inconnu").astype(str)
+    return df.reset_index(drop=True)
 
-    # 5. Colonne identifiant
-    if id_col in df.columns:
-        detected["id"] = id_col
-    else:
-        id_candidates = [c for c in df.columns if any(k in c.lower() for k in ["id", "num", "ref"])]
-        detected["id"] = id_candidates[0] if id_candidates else ""
 
-    return detected
+# --------------------------------------------------------------------------- par partition
+
+
+def _process_partition(
+    sub: pd.DataFrame, partition: str, llm: Callable[..., Any]
+) -> dict[str, Any]:
+    """Clustering fin, étiquetage, reclassement des outliers et fusion pour une partition.
+
+    `sub` : lignes de la partition (index réinitialisé). Renvoie les étiquettes par ligne et les
+    structures utiles à l'assemblage (cartes, titres, résultat de fusion, statistiques).
+    """
+    n = len(sub)
+    source = np.array(["dense_cluster"] * n, dtype=object)
+    stats: dict[str, Any] = {"partition": partition, "n": n, "mcs": None, "dbcv": None,
+                             "sweep": None, "n_outliers": 0, "n_reassigned": 0}
+    if n < 2 * min(MCS_SWEEP):
+        print(f"       -> '{partition}' : {n} incidents, trop peu pour un clustering (tous isolés).")
+        fine = np.array([OUTLIER_LABEL] * n, dtype=object)
+        source[:] = "unclassified_outlier"
+        stats.update(n_outliers=n, n_fine=0, n_merged=0)
+        return {"fine": fine, "merged": fine.copy(), "source": source, "cards": {}, "titles": {},
+                "fine_to_merged": {}, "merged_members": {}, "log": [], "stats": stats}
+
+    texts = sub[TEXT_COL].astype(str).tolist()
+    print(f"       -> '{partition}' : embeddings + UMAP ({n} incidents)...")
+    emb = np.asarray(clustering.embed_partition(texts))
+    X = clustering.reduce_umap(emb)
+    sizes = [s for s in MCS_SWEEP if s <= n // 2]
+    sweep = clustering.sweep_hdbscan(X, sizes)
+    raw = np.asarray(sweep.labels)
+    fine = np.array([OUTLIER_LABEL if k == -1 else f"{partition}_F{k}" for k in raw], dtype=object)
+    n_fine0 = len(set(fine.tolist()) - {OUTLIER_LABEL})
+    outlier_idx = np.where(raw == -1)[0]
+    stats.update(mcs=int(sweep.min_cluster_size), dbcv=float(sweep.dbcv), sweep=sweep.table,
+                 n_outliers=int(len(outlier_idx)))
+    print(f"          balayage : min_cluster_size={sweep.min_cluster_size}, DBCV={sweep.dbcv:.3f}, "
+          f"{n_fine0} clusters fins, {len(outlier_idx)} isolés")
+
+    # Cartes + étiquettes des clusters fins
+    cards = build_fine_cards(sub, fine, emb, partition)
+    titles = label_fine_clusters(cards, llm=llm)
+
+    # Reclassement LLM des outliers vers les clusters fins de la même partition
+    if len(outlier_idx) and cards:
+        taxonomy = [
+            {"cluster_id": fid, "problem_title": titles[fid]["fine_title"],
+             "common_cause": titles[fid]["failure_mode"]}
+            for fid in cards
+        ]
+        items = [{"incident_id": sub.at[i, ID_COL], "text": sub.at[i, TEXT_COL]} for i in outlier_idx]
+        assigned: dict[str, str] = {}
+        for b in range(0, len(items), OUTLIER_BATCH_SIZE):
+            for r in reassign_outliers_batch(items[b : b + OUTLIER_BATCH_SIZE], taxonomy, llm=llm):
+                assigned[str(r["incident_id"])] = r["assigned_cluster_id"]
+        for i in outlier_idx:
+            target = assigned.get(str(sub.at[i, ID_COL]), OUTLIER_LABEL)
+            if target in cards:
+                fine[i] = target
+                source[i] = "llm_reassigned"
+            else:
+                source[i] = "unclassified_outlier"
+        stats["n_reassigned"] = int((source == "llm_reassigned").sum())
+        print(f"          reclassement : {stats['n_reassigned']}/{len(outlier_idx)} isolés rattachés")
+        cards = build_fine_cards(sub, fine, emb, partition)
+    elif len(outlier_idx):
+        source[outlier_idx] = "unclassified_outlier"
+
+    # Agent de fusion
+    def relabel(labels: np.ndarray, new_ids: list[str]):
+        new_cards = build_fine_cards(sub, labels, emb, partition)
+        wanted = {k: new_cards[k] for k in new_ids if k in new_cards}
+        return wanted, label_fine_clusters(wanted, llm=llm)
+
+    state = FineState(partition=partition, X_umap=X, embeddings=emb, fine_labels=fine,
+                      cards=cards, titles=titles)
+    mr = run_merge_agent(state, llm=llm, relabel=relabel)
+    fine_final = np.array(list(mr.fine_labels), dtype=object)
+    cards = build_fine_cards(sub, fine_final, emb, partition)  # cartes finales (sous-clusters inclus)
+    merged = np.array([mr.fine_to_merged.get(f, OUTLIER_LABEL) for f in fine_final], dtype=object)
+    for e in mr.log:
+        e["partition"] = partition
+    n_merges = sum(1 for e in mr.log if e["action"] == "merge" and not e["vetoed"])
+    n_veto = sum(1 for e in mr.log if e["action"] == "merge" and e["vetoed"])
+    n_split = sum(1 for e in mr.log if e["action"] == "flag_heterogeneous" and e.get("accepted"))
+    stats.update(n_fine=len(set(fine_final.tolist()) - {OUTLIER_LABEL}), n_merged=len(mr.merged_members))
+    print(f"          fusion : {stats['n_fine']} fins -> {stats['n_merged']} fusionnés "
+          f"({n_merges} fusions, {n_veto} vetos, {n_split} scissions)")
+    return {"fine": fine_final, "merged": merged, "source": source, "cards": cards,
+            "titles": mr.titles, "fine_to_merged": mr.fine_to_merged,
+            "merged_members": mr.merged_members, "log": mr.log, "stats": stats}
+
+
+# --------------------------------------------------------------------------- aides d'assemblage
+
+
+def _merge_entry(merged_id: str, log: list[dict]) -> dict | None:
+    """Entrée de log synthétique d'un cluster fusionné (fusions acceptées, rondes cumulées)."""
+    ents = [e for e in log if e["action"] == "merge" and not e["vetoed"] and e["result_id"] == merged_id]
+    if not ents:
+        return None
+    ents = sorted(ents, key=lambda e: e["round"])
+    outcomes = [o for e in ents for o in e["prevented_outcomes"]]
+    last = ents[-1]
+    return {"shared_remediation": last["shared_remediation"], "prevented_outcomes": outcomes,
+            "justification": last["justification"]}
+
+
+def _plausibility_cards(
+    merged_members: dict[str, list[str]], fine_cards: dict[str, dict],
+    titles: dict[str, dict], log: list[dict],
+) -> dict[str, dict]:
+    """Cartes pour check_plausibility : clés = ids fusionnés (précurseurs) et ids fins (escalades)."""
+    cards: dict[str, dict] = {}
+    for fid, c in fine_cards.items():
+        t = titles.get(fid, {})
+        cards[fid] = {"title": t.get("fine_title", fid), "failure_mode": t.get("failure_mode", ""),
+                      "representative_texts": list(c.get("representative_texts") or [])[:2]}
+    for mid, members in merged_members.items():
+        entry = _merge_entry(mid, log)
+        title = (entry or {}).get("shared_remediation") or " / ".join(
+            titles.get(f, {}).get("fine_title", f) for f in members)
+        reps = [(fine_cards.get(f, {}).get("representative_texts") or [""])[0] for f in members[:3]]
+        cards[mid] = {
+            "title": title,
+            "failure_mode": " / ".join(titles.get(f, {}).get("failure_mode", "") for f in members),
+            "representative_texts": [r for r in reps if r],
+        }
+    return cards
+
+
+def _json_default(o: Any) -> Any:
+    if isinstance(o, np.generic):
+        return o.item()
+    if isinstance(o, np.ndarray):
+        return o.tolist()
+    return str(o)
+
+
+def _dumps(v: Any) -> str:
+    return json.dumps(v, ensure_ascii=False, default=_json_default)
+
+
+# --------------------------------------------------------------------------- pipeline
 
 
 def run_agentic_segmentation(
     input_csv: Path | None = None,
     out_dir: Path = DEFAULT_OUT_DIR,
-    min_cluster_size: int = MIN_CLUSTER_SIZE,
-    split_col: str | None = DEFAULT_SPLIT_COL,
-) -> tuple[Path, Path]:
-    """Exécute l'ensemble du pipeline agentique."""
-    if input_csv is None:
-        if DEFAULT_INPUT.exists():
-            input_csv = DEFAULT_INPUT
-        elif FALLBACK_INPUT.exists():
-            input_csv = FALLBACK_INPUT
-        else:
-            raise FileNotFoundError(
-                f"Fichier d'entrée introuvable ({DEFAULT_INPUT} ou {FALLBACK_INPUT})."
-            )
+    llm: Callable[..., Any] | None = None,
+) -> dict[str, Path]:
+    """Exécute le pipeline complet et renvoie {nom logique: chemin} des fichiers écrits."""
+    llm = llm or llm_client.call_llm_json  # résolu à l'appel : les défauts des modules sont liés à l'import
+    out_dir = Path(out_dir)
+    N = 7
 
-    print(f"\n[1/6] Chargement des incidents depuis {input_csv}...")
-    df = pd.read_csv(input_csv)
-    cols = validate_and_detect_columns(df)
-
-    if not cols["id"]:
-        df["incident_id"] = np.arange(1, len(df) + 1)
-        cols["id"] = "incident_id"
-
-    # Filtrage des lignes avec texte valide
-    df = df[df[cols["text"]].notna() & (df[cols["text"]].astype(str).str.strip() != "")].copy()
-    df[cols["cost"]] = pd.to_numeric(df[cols["cost"]], errors="coerce").fillna(0.0)
-    if cols["downtime"]:
-        df[cols["downtime"]] = pd.to_numeric(df[cols["downtime"]], errors="coerce").fillna(0.0)
-
+    input_csv = _resolve_input(input_csv)
+    print(f"\n[1/{N}] Chargement des incidents depuis {input_csv}...")
+    df = _load_incidents(input_csv)
     print(f"       -> {len(df)} incidents exploitables chargés.")
-
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Découpage par domaine si disponible
-    do_split = split_col and split_col in df.columns
-    groups = df.groupby(split_col).groups if do_split else {"global": df.index}
+    # --- Partitions : clustering fin, étiquetage, reclassement, fusion
+    print(f"\n[2/{N}] Clustering fin + fusion par remédiation (partition par {PARTITION_COL})...")
+    df[FINE_COL] = OUTLIER_LABEL
+    df[MERGED_COL] = OUTLIER_LABEL
+    df["assignment_source"] = "unclassified_outlier"
+    fine_cards: dict[str, dict] = {}
+    fine_titles: dict[str, dict] = {}
+    merged_members: dict[str, list[str]] = {}
+    merged_partition: dict[str, str] = {}
+    log: list[dict] = []
+    stats_list: list[dict] = []
+    sweep_tables = []
+    plaus_cards: dict[str, dict] = {}
+    for partition in sorted(df[PARTITION_COL].unique()):
+        idx = df.index[df[PARTITION_COL] == partition]
+        sub = df.loc[idx].reset_index(drop=True)
+        res = _process_partition(sub, partition, llm)
+        df.loc[idx, FINE_COL] = res["fine"]
+        df.loc[idx, MERGED_COL] = res["merged"]
+        df.loc[idx, "assignment_source"] = res["source"]
+        fine_cards.update(res["cards"])
+        fine_titles.update(res["titles"])
+        merged_members.update(res["merged_members"])
+        merged_partition.update({m: partition for m in res["merged_members"]})
+        log.extend(res["log"])
+        stats_list.append(res["stats"])
+        if res["stats"]["sweep"] is not None:
+            sweep_tables.append(res["stats"]["sweep"].assign(partition=partition))
+        plaus_cards.update(_plausibility_cards(res["merged_members"], res["cards"], res["titles"], res["log"]))
 
-    print(f"\n[2/6] Passe 1 : Clustering UMAP + HDBSCAN ({'partition par ' + split_col if do_split else 'global'})...")
+    # --- Concentration (où agir)
+    print(f"\n[3/{N}] Profil de concentration (site, équipement, période) des clusters fusionnés...")
+    conc = compute_concentration(df, MERGED_COL, PARTITION_COL)
+    n_conc_sig = int(conc["significant"].sum()) if len(conc) else 0
+    print(f"       -> {n_conc_sig} concentrations significatives sur {len(conc)} testées.")
 
-    all_assigned = []
-    cluster_profiles = {}  # cluster_id -> dict(keywords, reps, profile)
+    # --- Précurseurs + escalades + plausibilité + preuves
+    print(f"\n[4/{N}] Fouille de précurseurs (fusionné) et d'escalades (fin), {PRECURSOR_N_PERMUTATIONS} permutations...")
+    prec = mine_precursors(df, MERGED_COL, n_permutations=PRECURSOR_N_PERMUTATIONS)
+    esc = mine_escalations(df, FINE_COL, MERGED_COL, n_permutations=PRECURSOR_N_PERMUTATIONS)
+    frames = [f for f in (prec, esc) if len(f)]
+    pairs = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=PAIR_COLUMNS)
+    n_sig = int(pairs["significant"].astype(bool).sum()) if len(pairs) else 0
+    print(f"       -> {n_sig} règles statistiquement significatives ; contrôle de plausibilité LLM...")
+    pairs = check_plausibility(pairs, plaus_cards, llm=llm)
+    n_plaus = int((pairs["significant"].astype(bool) & pairs["plausible"].astype(bool)
+                   & (pairs["kind"] != "recurrence")).sum()) if len(pairs) else 0
+    print(f"       -> {n_plaus} règles significatives et plausibles.")
+    ev_parts = []
+    non_esc, esc_rows = pairs[pairs["kind"] != "escalation"], pairs[pairs["kind"] == "escalation"]
+    if len(non_esc):
+        ev_parts.append(extract_evidence(df, non_esc, label_col=MERGED_COL))
+    if len(esc_rows):
+        ev_parts.append(extract_evidence(df, esc_rows, label_col=FINE_COL))
+    ev_parts = [e for e in ev_parts if len(e)]
+    evidence = pd.concat(ev_parts, ignore_index=True) if ev_parts else pd.DataFrame(columns=EVIDENCE_COLUMNS)
 
-    for group_name, idx_list in groups.items():
-        sub_df = df.loc[idx_list].reset_index(drop=True)
-        print(f"       -> Clustering du groupe '{group_name}' ({len(sub_df)} incidents)...")
-        labels, embeddings, keywords, reps = cluster_texts(
-            sub_df,
-            text_col=cols["text"],
-            min_cluster_size=min_cluster_size,
+    # --- Criticité (cluster d'isolés inclus) puis diagnostic final
+    print(f"\n[5/{N}] Criticité et diagnostic LLM des clusters fusionnés...")
+    crit = compute_cluster_criticality(df, cluster_col=MERGED_COL, cost_col=COST_COL, downtime_col=DOWNTIME_COL)
+    impact_cols = ["frequency", "mean_cost_eur", "total_cost_eur", "mean_downtime_hours",
+                   "total_downtime_hours", "criticality_tier"]
+    diagnoses: dict[str, dict] = {}
+    todo = [m for m in crit[MERGED_COL] if m != OUTLIER_LABEL]
+    for k, mid in enumerate(todo, 1):
+        print(f"       [{k}/{len(todo)}] {mid}")
+        impact = crit.loc[crit[MERGED_COL] == mid, impact_cols].iloc[0].to_dict()
+        ctx = build_diagnosis_context(
+            mid, merged_members.get(mid, []), fine_titles, fine_cards, _merge_entry(mid, log),
+            conc, pairs, evidence, {k2: (v.item() if hasattr(v, "item") else v) for k2, v in impact.items()},
         )
+        diagnoses[mid] = diagnose_merged_cluster(ctx, llm=llm)
+    if (df[MERGED_COL] == OUTLIER_LABEL).any():
+        diagnoses[OUTLIER_LABEL] = dict(OUTLIER_DIAGNOSIS)
 
-        for i, row in sub_df.iterrows():
-            lbl = labels[i]
-            c_id = f"{group_name}_{lbl}" if lbl != -1 else f"{group_name}_-1"
-            all_assigned.append({
-                cols["id"]: row[cols["id"]],
-                "raw_cluster_id": c_id,
-                "is_outlier": (lbl == -1),
-                "text": row[cols["text"]],
-            })
+    # --- Tables de sortie
+    print(f"\n[6/{N}] Assemblage et sauvegarde dans {out_dir}...")
+    merged_df = crit.copy()
+    merged_df["partition"] = merged_df[MERGED_COL].map(merged_partition).fillna("")
+    merged_df["fine_cluster_ids"] = merged_df[MERGED_COL].map(lambda m: merged_members.get(m, []))
+    for key in ("problem_title", "problem_description", "common_cause", "system_impact",
+                "prevented_outcomes", "recommendations", "early_warning_rules"):
+        default = [] if key in JSON_LIST_COLS else ""
+        merged_df[key] = merged_df[MERGED_COL].map(lambda m, key=key, default=default: diagnoses.get(m, {}).get(key, default))
+    merged_cols = [MERGED_COL, "partition", "fine_cluster_ids", "criticality_rank", "criticality_tier",
+                   "frequency", "mean_cost_eur", "total_cost_eur", "mean_downtime_hours",
+                   "total_downtime_hours", "problem_title", "problem_description", "common_cause",
+                   "system_impact", "prevented_outcomes", "recommendations", "early_warning_rules"]
+    merged_df = merged_df[merged_cols].sort_values("criticality_rank").reset_index(drop=True)
+    merged_csv = merged_df.copy()
+    for c in JSON_LIST_COLS:
+        merged_csv[c] = merged_csv[c].map(_dumps)
 
-        # Mémorisation des métadonnées des clusters denses (hors -1)
-        sub_df["raw_cluster"] = labels
-        for lbl in np.unique(labels):
-            if lbl == -1:
-                continue
-            c_id = f"{group_name}_{lbl}"
-            cluster_profiles[c_id] = {
-                "cluster_id": c_id,
-                "keywords": keywords.get(lbl, []),
-                "representative_texts": reps.get(lbl, []),
-                "metadata_profile": get_cluster_metadata_profile(sub_df, lbl),
-            }
+    title_map = merged_df.set_index(MERGED_COL)["problem_title"].to_dict()
+    cause_map = merged_df.set_index(MERGED_COL)["common_cause"].to_dict()
+    tier_map = merged_df.set_index(MERGED_COL)["criticality_tier"].to_dict()
+    seg = df.copy()
+    seg["cluster_id"] = seg[MERGED_COL]
+    seg["problem_title"] = seg[MERGED_COL].map(title_map)
+    seg["common_cause"] = seg[MERGED_COL].map(cause_map)
+    seg["cluster_criticality_tier"] = seg[MERGED_COL].map(tier_map)
+    lead = [ID_COL, FINE_COL, MERGED_COL, "cluster_id", "problem_title", "common_cause",
+            "cluster_criticality_tier", "assignment_source"]
+    seg = seg[lead + [c for c in seg.columns if c not in lead]]
 
-    assigned_df = pd.DataFrame(all_assigned)
-    dense_count = (assigned_df["is_outlier"] == False).sum()
-    outlier_count = (assigned_df["is_outlier"] == True).sum()
-    print(f"       -> Clusters denses formés : {len(cluster_profiles)} groupes ({dense_count} incidents).")
-    print(f"       -> Incidents isolés (outliers -1) : {outlier_count} incidents.")
-
-    print(f"\n[3/6] Diagnostic LLM des {len(cluster_profiles)} clusters denses...")
-    clusters_diagnoses: dict[str, dict[str, str]] = {}
-    for c_id, p in tqdm(cluster_profiles.items(), desc="Diagnostic LLM"):
-        diag = diagnose_cluster(
-            cluster_id=c_id,
-            keywords=p["keywords"],
-            representative_texts=p["representative_texts"],
-            metadata_profile=p["metadata_profile"],
-        )
-        clusters_diagnoses[c_id] = diag
-
-    # Taxonomie établie pour la passe 2
-    taxonomy_list = [
-        {
-            "cluster_id": c_id,
-            "problem_title": d["problem_title"],
-            "common_cause": d["common_cause"],
-        }
-        for c_id, d in clusters_diagnoses.items()
-    ]
-
-    print(f"\n[4/6] Passe 2 : Reclassement LLM des {outlier_count} incidents isolés...")
-    outliers_to_reassign = assigned_df[assigned_df["is_outlier"]].copy()
-
-    reassigned_map: dict[Any, dict[str, Any]] = {}
-    if not outliers_to_reassign.empty and taxonomy_list:
-        outlier_items = outliers_to_reassign[[cols["id"], "text"]].to_dict(orient="records")
-        for i in range(0, len(outlier_items), OUTLIER_BATCH_SIZE):
-            batch = outlier_items[i : i + OUTLIER_BATCH_SIZE]
-            reassigned_batch = reassign_outliers_batch(batch, taxonomy_list)
-            for r in reassigned_batch:
-                reassigned_map[r["incident_id"]] = r
-
-    # Mise à jour des clusters finaux et sources d'affectation
-    final_clusters = []
-    assignment_sources = []
-    for _, row in assigned_df.iterrows():
-        inc_id = row[cols["id"]]
-        if not row["is_outlier"]:
-            final_clusters.append(row["raw_cluster_id"])
-            assignment_sources.append("dense_cluster")
-        else:
-            reassign_info = reassigned_map.get(inc_id, {})
-            assigned_c = reassign_info.get("assigned_cluster_id", "isole_atypique")
-            if assigned_c in clusters_diagnoses:
-                final_clusters.append(assigned_c)
-                assignment_sources.append("llm_reassigned")
-            else:
-                final_clusters.append("isole_atypique")
-                assignment_sources.append("unclassified_outlier")
-
-    assigned_df["cluster_id"] = final_clusters
-    assigned_df["assignment_source"] = assignment_sources
-
-    # Ajout du diagnostic pour le groupe 'isole_atypique' s'il contient des incidents
-    if "isole_atypique" in set(final_clusters):
-        clusters_diagnoses["isole_atypique"] = {
-            "problem_title": "Incidents isolés et anomalies atypiques",
-            "problem_description": "Ensemble d'incidents singuliers ne correspondant à aucun cluster récurrent établi.",
-            "common_cause": "Origines variées et non récurrentes (facteurs externes exceptionnels, signaux faibles).",
-            "system_impact": "Impacts ponctuels sans tendance systémique identifiée.",
-            "actionable_recommendations": "Maintien d'une veille opérationnelle et traitement au cas par cas.",
-        }
-
-    # Fusion avec le dataframe original
-    df_merged = df.merge(
-        assigned_df[[cols["id"], "cluster_id", "assignment_source"]],
-        on=cols["id"],
-    )
-
-    print(f"\n[5/6] Calcul de la criticité financière et opérationnelle (fréquence x coûts)...")
-    crit_df = compute_cluster_criticality(
-        df_merged,
-        cluster_col="cluster_id",
-        cost_col=cols["cost"],
-        downtime_col=cols["downtime"],
-    )
-
-    # Intégration des diagnostics LLM dans la table récapitulative
-    diag_rows = []
-    for c_id in crit_df["cluster_id"]:
-        d = clusters_diagnoses.get(c_id, {
-            "problem_title": f"Groupe {c_id}",
-            "problem_description": "N/A",
-            "common_cause": "N/A",
-            "system_impact": "N/A",
-            "actionable_recommendations": "N/A",
+    sizes = df[FINE_COL].value_counts()
+    fine_rows = []
+    f2m = {f: m for m, fs in merged_members.items() for f in fs}
+    for fid in sorted(fine_cards):
+        t = fine_titles.get(fid, {})
+        fine_rows.append({
+            FINE_COL: fid, "partition": fine_cards[fid].get("partition", ""),
+            MERGED_COL: f2m.get(fid, ""), "size": int(sizes.get(fid, 0)),
+            "fine_title": t.get("fine_title", ""), "failure_mode": t.get("failure_mode", ""),
+            "keywords": ";".join(map(str, fine_cards[fid].get("keywords") or [])),
         })
-        diag_rows.append(d)
+    fine_df = pd.DataFrame(fine_rows, columns=[FINE_COL, "partition", MERGED_COL, "size",
+                                               "fine_title", "failure_mode", "keywords"])
+    sweep_df = (pd.concat(sweep_tables, ignore_index=True) if sweep_tables
+                else pd.DataFrame(columns=["partition", "min_cluster_size", "n_clusters", "outlier_rate", "dbcv"]))
+    sweep_df = sweep_df[["partition", "min_cluster_size", "n_clusters", "outlier_rate", "dbcv"]]
 
-    diag_df = pd.DataFrame(diag_rows)
-    clusters_summary = pd.concat([crit_df, diag_df], axis=1)
+    paths = {
+        "incidents_segmented": out_dir / "incidents_segmented.csv",
+        "clusters_fine": out_dir / "clusters_fine.csv",
+        "clusters_merged": out_dir / "clusters_merged.csv",
+        "merge_log": out_dir / "merge_log.json",
+        "concentration": out_dir / "concentration.csv",
+        "precursor_pairs": out_dir / "precursor_pairs.csv",
+        "precursor_evidence": out_dir / "precursor_evidence.csv",
+        "fine_sweep": out_dir / "fine_sweep.csv",
+    }
+    seg.to_csv(paths["incidents_segmented"], index=False)
+    fine_df.to_csv(paths["clusters_fine"], index=False)
+    merged_csv.to_csv(paths["clusters_merged"], index=False)
+    paths["merge_log"].write_text(
+        json.dumps(log, ensure_ascii=False, indent=2, default=_json_default), encoding="utf-8")
+    (conc if len(conc) else pd.DataFrame(columns=CONCENTRATION_COLUMNS)).to_csv(paths["concentration"], index=False)
+    pairs[PAIR_COLUMNS].to_csv(paths["precursor_pairs"], index=False)
+    evidence[EVIDENCE_COLUMNS].to_csv(paths["precursor_evidence"], index=False)
+    sweep_df.to_csv(paths["fine_sweep"], index=False)
+    for name, p in paths.items():
+        print(f"       ✓ {p}")
 
-    # Réorganisation ordonnée des colonnes du résumé
-    summary_columns_order = [
-        "cluster_id",
-        "criticality_rank",
-        "criticality_tier",
-        "problem_title",
-        "common_cause",
-        "frequency",
-        "mean_cost_eur",
-        "total_cost_eur",
-        "mean_downtime_hours",
-        "total_downtime_hours",
-        "problem_description",
-        "system_impact",
-        "actionable_recommendations",
-    ]
-    summary_columns_order = [c for c in summary_columns_order if c in clusters_summary.columns]
-    clusters_summary = clusters_summary[summary_columns_order]
-
-    # Enrichissement du DataFrame d'incidents
-    title_map = clusters_summary.set_index("cluster_id")["problem_title"].to_dict()
-    cause_map = clusters_summary.set_index("cluster_id")["common_cause"].to_dict()
-    tier_map = clusters_summary.set_index("cluster_id")["criticality_tier"].to_dict()
-
-    df_merged["problem_title"] = df_merged["cluster_id"].map(title_map)
-    df_merged["common_cause"] = df_merged["cluster_id"].map(cause_map)
-    df_merged["cluster_criticality_tier"] = df_merged["cluster_id"].map(tier_map)
-
-    # Réorganisation des colonnes enrichies
-    leading_cols = [cols["id"], "cluster_id", "problem_title", "common_cause", "cluster_criticality_tier", "assignment_source"]
-    remaining_cols = [c for c in df_merged.columns if c not in leading_cols]
-    incidents_segmented = df_merged[leading_cols + remaining_cols]
-
-    print(f"\n[6/6] Sauvegarde des fichiers dans {out_dir}...")
-    summary_path = out_dir / "clusters_summary.csv"
-    incidents_path = out_dir / "incidents_segmented.csv"
-
-    clusters_summary.to_csv(summary_path, index=False)
-    incidents_segmented.to_csv(incidents_path, index=False)
-
-    print(f"       ✓ {summary_path} ({len(clusters_summary)} clusters)")
-    print(f"       ✓ {incidents_path} ({len(incidents_segmented)} incidents)")
-
-    # Affichage du top des clusters les plus critiques
-    print("\n" + "=" * 90)
-    print("TOP DES CLUSTERS PAR CRITICITÉ OPÉRATIONNELLE (FRÉQUENCE × COÛTS) :")
+    # --- Synthèse console
+    print(f"\n[7/{N}] Synthèse")
     print("=" * 90)
-    top_crit = clusters_summary.head(8)
-    for _, row in top_crit.iterrows():
-        print(f"[{row['criticality_tier'].upper()}] Rang {row['criticality_rank']} | {row['cluster_id']} : {row['problem_title']}")
-        print(f"    Impact : {row['frequency']} incidents | Coût total : {row['total_cost_eur']:,.2f} € (Moyenne : {row['mean_cost_eur']:,.2f} €) | Arrêt total : {row['total_downtime_hours']:.1f} h")
-        print(f"    Cause commune : {row['common_cause']}")
-        print(f"    Actions recommandées : {row['actionable_recommendations']}")
+    for s in stats_list:
+        mcs = "n/a" if s["mcs"] is None else f"{s['mcs']}"
+        dbcv = "n/a" if s["dbcv"] is None else f"{s['dbcv']:.3f}"
+        print(f"Partition {s['partition']} : mcs={mcs} | DBCV={dbcv} | {s['n_fine']} fins -> {s['n_merged']} fusionnés | "
+              f"isolés {s['n_outliers']} (reclassés {s['n_reassigned']})")
+    print(f"Concentrations significatives : {n_conc_sig} | règles précurseurs significatives et plausibles : {n_plaus}")
+    print("=" * 90)
+    print("TOP DES CLUSTERS PAR CRITICITÉ (FRÉQUENCE × COÛTS) :")
+    print("=" * 90)
+    for _, row in merged_df.head(8).iterrows():
+        print(f"[{str(row['criticality_tier']).upper()}] Rang {row['criticality_rank']} | {row[MERGED_COL]} : {row['problem_title']}")
+        print(f"    Impact : {row['frequency']} incidents | Coût total : {row['total_cost_eur']:,.2f} € "
+              f"(Moyenne : {row['mean_cost_eur']:,.2f} €) | Arrêt total : {row['total_downtime_hours']:.1f} h")
+        outs = row["prevented_outcomes"]
+        print(f"    Défaillances évitées : {'; '.join(outs) if outs else 'n/a'}")
+        recs = row["recommendations"]
+        print(f"    Première recommandation : {recs[0]['action'] if recs else 'n/a'}")
         print("-" * 90)
-
-    return summary_path, incidents_path
+    return paths
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Pipeline agentique de segmentation des incidents")
     parser.add_argument("--input", type=Path, default=None, help="Chemin du CSV d'incidents")
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR, help="Dossier de sortie")
-    parser.add_argument("--min-cluster-size", type=int, default=MIN_CLUSTER_SIZE, help="Taille min de cluster")
-    parser.add_argument("--no-split", action="store_true", help="Clustering global sans découpage par asset_type")
     args = parser.parse_args()
-
-    split_col = None if args.no_split else DEFAULT_SPLIT_COL
-    run_agentic_segmentation(
-        input_csv=args.input,
-        out_dir=args.out_dir,
-        min_cluster_size=args.min_cluster_size,
-        split_col=split_col,
-    )
+    run_agentic_segmentation(input_csv=args.input, out_dir=args.out_dir)
 
 
 if __name__ == "__main__":

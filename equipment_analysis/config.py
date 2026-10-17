@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+from agentic_pipeline.config import SEVERITY_ORDER
+
 DEFAULT_INPUT_SEGMENTED = Path("outputs/segmentation/incidents_segmented.csv")
 DEFAULT_INPUT_FULL = Path("outputs/incidents_full.csv")
 DEFAULT_INPUT_DATA = Path("data/incidents_full.csv")
@@ -23,3 +25,6 @@ ASSET_COL = "asset_type"
 ID_COL = "incident_id"
 PROBLEM_COL = "problem_title"
 CLUSTER_COL = "cluster_id"
+
+# Niveau de sévérité le plus élevé (dernier élément de SEVERITY_ORDER)
+TOP_SEVERITY = SEVERITY_ORDER[-1]

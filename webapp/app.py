@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -18,7 +19,20 @@ st.set_page_config(
 )
 
 # Chemins des données
-SUMMARY_PATH = Path("outputs/segmentation/clusters_summary.csv")
+SEG_DIR = Path("outputs/segmentation")
+SUMMARY_PATH = SEG_DIR / "clusters_merged.csv"
+FINE_PATH = SEG_DIR / "clusters_fine.csv"
+CONCENTRATION_PATH = SEG_DIR / "concentration.csv"
+PRECURSOR_PAIRS_PATH = SEG_DIR / "precursor_pairs.csv"
+PRECURSOR_EVIDENCE_PATH = SEG_DIR / "precursor_evidence.csv"
+RUN_CMD = "python main.py --steps segmentation equipment"
+NO_PRECURSOR_MSG = (
+    "Aucun signal précurseur statistiquement significatif détecté sur la flotte — "
+    "les incidents de ce type ne sont pas précédés plus souvent que par hasard "
+    "d'un autre type d'incident sur le même équipement."
+)
+ISOLATED_ID = "isole_atypique"
+SCOPE_BADGES = {"fleet": "🌐 flotte", "site": "📍 site", "equipment": "⚙️ équipement"}
 INCIDENTS_PATH = Path("outputs/segmentation/incidents_segmented.csv")
 EQUIPMENT_SUMMARY_PATH = Path("outputs/equipment/equipment_summary.csv")
 EQUIPMENT_TIMELINE_PATH = Path("outputs/equipment/incidents_with_timeline.csv")
@@ -39,11 +53,14 @@ def load_data() -> tuple[pd.DataFrame, pd.DataFrame]:
     if not SUMMARY_PATH.exists() or not INCIDENTS_PATH.exists():
         st.error(
             f"Fichiers introuvables ({SUMMARY_PATH} ou {INCIDENTS_PATH}). "
-            "Exécutez d'abord : `python main.py --steps segmentation`"
+            f"Exécutez d'abord : `{RUN_CMD}`"
         )
         st.stop()
 
-    summary_df = pd.read_csv(SUMMARY_PATH)
+    summary_df = pd.read_csv(SUMMARY_PATH, keep_default_na=False, na_values=[""])
+    summary_df["partition"] = summary_df["partition"].fillna("")
+    # Alias de compatibilité : l'identifiant de cluster est l'id fusionné.
+    summary_df["cluster_id"] = summary_df["merged_cluster_id"]
     incidents_df = pd.read_csv(INCIDENTS_PATH)
 
     # Conversion des types numériques
@@ -59,6 +76,138 @@ def load_data() -> tuple[pd.DataFrame, pd.DataFrame]:
             incidents_df[col] = pd.to_numeric(incidents_df[col], errors="coerce").fillna(0.0)
 
     return summary_df, incidents_df
+
+
+def parse_json_list(value) -> list:
+    """Parse une colonne JSON en liste ; [] si NaN, vide ou invalide."""
+    if isinstance(value, list):
+        return value
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return []
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError):
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
+@st.cache_data
+def load_action_plan_data() -> dict[str, pd.DataFrame]:
+    """Charge fins, concentration, précurseurs et preuves (tolère les fichiers vides)."""
+    out: dict[str, pd.DataFrame] = {}
+    for key, path in {
+        "fine": FINE_PATH,
+        "concentration": CONCENTRATION_PATH,
+        "pairs": PRECURSOR_PAIRS_PATH,
+        "evidence": PRECURSOR_EVIDENCE_PATH,
+    }.items():
+        if not path.exists():
+            st.error(f"Fichier introuvable : {path}. Exécutez d'abord : `{RUN_CMD}`")
+            out[key] = pd.DataFrame()
+            continue
+        try:
+            out[key] = pd.read_csv(path)
+        except pd.errors.EmptyDataError:
+            out[key] = pd.DataFrame()
+    return out
+
+
+def _bool_series(df: pd.DataFrame, col: str) -> pd.Series:
+    if col not in df.columns:
+        return pd.Series(False, index=df.index)
+    return df[col].astype(str).str.lower().isin(["true", "1"])
+
+
+def render_action_card(row: pd.Series, data: dict[str, pd.DataFrame], incidents_df: pd.DataFrame) -> None:
+    cid = row["merged_cluster_id"]
+    st.markdown(f"**Partition :** `{row['partition']}` · **Identifiant :** `{cid}` · "
+                f"**Arrêt cumulé :** {row['total_downtime_hours']:.0f} h")
+
+    st.markdown("##### 🔧 Remédiation / cause")
+    st.write(row.get("problem_description", ""))
+    st.info(f"**Cause commune :** {row.get('common_cause', '')}")
+
+    st.markdown("##### 🛡️ Défaillances évitées")
+    outcomes = parse_json_list(row.get("prevented_outcomes"))
+    if outcomes:
+        st.markdown("\n".join(f"- {o}" for o in outcomes))
+    else:
+        st.caption("Non renseigné.")
+
+    st.markdown("##### ✅ Recommandations")
+    recos = [r for r in parse_json_list(row.get("recommendations")) if isinstance(r, dict)]
+    if not recos:
+        st.caption("Aucune recommandation.")
+    for r in recos:
+        badge = SCOPE_BADGES.get(r.get("scope"), str(r.get("scope", "")))
+        targets = r.get("targets") if isinstance(r.get("targets"), list) else []
+        tgt = f" — cibles : {', '.join(f'`{t}`' for t in targets)}" if targets else ""
+        st.markdown(f"- **{badge}** {r.get('action', '')}{tgt}")
+        if r.get("rationale"):
+            st.caption(r["rationale"])
+
+    st.markdown("##### 🎯 Où agir")
+    conc = data["concentration"]
+    if not conc.empty and "merged_cluster_id" in conc.columns:
+        c = conc[(conc["merged_cluster_id"] == cid) & _bool_series(conc, "significant")]
+    else:
+        c = pd.DataFrame()
+    if c.empty:
+        st.caption("Aucune concentration significative (pas de site, équipement ou période sur-représenté).")
+    else:
+        st.dataframe(
+            c.sort_values("lift", ascending=False)[["dimension", "value", "observed", "expected", "lift", "q_value"]]
+            .rename(columns={"dimension": "Dimension", "value": "Valeur", "observed": "Observé",
+                             "expected": "Attendu", "lift": "Lift", "q_value": "q"}),
+            hide_index=True, use_container_width=True,
+            column_config={"Attendu": st.column_config.NumberColumn(format="%.1f"),
+                           "Lift": st.column_config.NumberColumn(format="%.2f"),
+                           "q": st.column_config.NumberColumn(format="%.4f")},
+        )
+
+    st.markdown("##### ⏳ Signaux précurseurs")
+    pairs = data["pairs"]
+    rules = pd.DataFrame()
+    if not pairs.empty:
+        mask = _bool_series(pairs, "significant") & _bool_series(pairs, "plausible")
+        into = (pairs.get("consequent") == cid) | (pairs.get("scope_cluster") == cid)
+        rules = pairs[mask & into]
+    if rules.empty:
+        st.info(NO_PRECURSOR_MSG)
+    else:
+        for _, p in rules.sort_values("lift", ascending=False).iterrows():
+            st.markdown(
+                f"- **{p['kind']}** : `{p['antecedent']}` → `{p['consequent']}` sous {p['window_days']} j — "
+                f"lift {p['lift']:.2f}, {p['n_equipments']} équipement(s), q={p['q_value']:.3f}"
+            )
+            if isinstance(p.get("monitoring_rule"), str):
+                st.caption(f"Règle de surveillance : {p['monitoring_rule']}")
+            if isinstance(p.get("mechanism"), str):
+                st.caption(f"Mécanisme : {p['mechanism']}")
+        ev = data["evidence"]
+        if not ev.empty and "consequent_incident_id" in ev.columns:
+            ids = set(incidents_df.loc[incidents_df["cluster_id"] == cid, "incident_id"])
+            ev_c = ev[ev["consequent_incident_id"].isin(ids)]
+            st.markdown(f"**Preuves : {len(ev_c)} cas observé(s)**")
+            if not ev_c.empty:
+                st.dataframe(ev_c, hide_index=True, use_container_width=True)
+        else:
+            st.caption("Aucune preuve détaillée disponible.")
+
+    st.markdown("##### 🧩 Modes de défaillance")
+    fine = data["fine"]
+    if not fine.empty and "merged_cluster_id" in fine.columns:
+        f = fine[fine["merged_cluster_id"] == cid]
+    else:
+        f = pd.DataFrame()
+    if f.empty:
+        st.caption("Aucun sous-cluster fin (incidents isolés ou non regroupés).")
+    else:
+        st.dataframe(
+            f[["fine_cluster_id", "fine_title", "size", "keywords"]]
+            .rename(columns={"fine_cluster_id": "ID", "fine_title": "Mode", "size": "Taille", "keywords": "Mots-clés"}),
+            hide_index=True, use_container_width=True,
+        )
 
 
 @st.cache_data
@@ -104,7 +253,7 @@ def main() -> None:
     st.sidebar.divider()
     st.sidebar.info(
         "💡 **Sources des données** :\n"
-        "- `clusters_summary.csv` (diagnostic LLM & Pareto)\n"
+        "- `clusters_merged.csv` (plan d'action par cluster fusionné)\n"
         "- `incidents_segmented.csv` (1800 incidents enrichis)"
     )
 
@@ -116,12 +265,45 @@ def main() -> None:
     )
 
     # Onglets principaux
-    tab1, tab2, tab3, tab4 = st.tabs([
+    tab0, tab1, tab2, tab3, tab4 = st.tabs([
+        "🎯 Plan d'action",
         "📊 Synthèse Exécutive & Pareto",
         "🔍 Diagnostic Détaillé par Cluster",
         "📋 Explorateur d'Incidents",
         "🔬 Chronologie & Efficacité Équipements",
     ])
+
+    # =========================================================================
+    # ONGLET 0 : PLAN D'ACTION
+    # =========================================================================
+    with tab0:
+        st.subheader("Plan d'action par voie de remédiation")
+        ap_data = load_action_plan_data()
+        cards = summary_df[summary_df["merged_cluster_id"] != ISOLATED_ID].sort_values("criticality_rank")
+        iso = summary_df[summary_df["merged_cluster_id"] == ISOLATED_ID]
+        if len(iso):
+            st.caption(f"{int(iso['frequency'].sum())} incidents isolés / atypiques non regroupés (sans carte).")
+
+        a1, a2, a3 = st.columns([1, 1, 2])
+        with a1:
+            part_f = st.multiselect("Partition (type d'actif) :", sorted(p for p in cards["partition"].unique() if p), key="ap_part")
+        with a2:
+            tier_f = st.multiselect("Criticité :", ["Critique", "Élevée", "Moyenne", "Faible"], key="ap_tier")
+        with a3:
+            q_f = st.text_input("Recherche dans le titre :", "", key="ap_q")
+        if part_f:
+            cards = cards[cards["partition"].isin(part_f)]
+        if tier_f:
+            cards = cards[cards["criticality_tier"].isin(tier_f)]
+        if q_f.strip():
+            cards = cards[cards["problem_title"].str.contains(q_f.strip(), case=False, na=False)]
+
+        st.caption(f"{len(cards)} carte(s) affichée(s).")
+        for _, row in cards.iterrows():
+            header = (f"[{row['criticality_tier']}] {row['problem_title']} — "
+                      f"{int(row['frequency'])} incidents — {format_currency(row['total_cost_eur'])}")
+            with st.expander(header):
+                render_action_card(row, ap_data, incidents_df)
 
     # =========================================================================
     # ONGLET 1 : SYNTHÈSE EXÉCUTIVE & PARETO
@@ -252,7 +434,7 @@ def main() -> None:
         st.divider()
 
         # Tableau des 37 clusters
-        st.markdown("#### Liste Complète des 37 Clusters de Défaillances")
+        st.markdown("#### Liste Complète des Clusters de Défaillances")
         tier_filter = st.multiselect(
             "Filtrer par niveau de criticité :",
             options=["Critique", "Élevée", "Moyenne", "Faible"],
@@ -338,7 +520,13 @@ def main() -> None:
         with d_col2:
             st.markdown("#### 🛡️ Impact Système & Recommandations")
             st.warning(f"**Impact opérationnel sur l'installation :**\n\n{cluster_data['system_impact']}")
-            st.success(f"**Actions correctives / préventives préconisées :**\n\n{cluster_data['actionable_recommendations']}")
+            recos = [r for r in parse_json_list(cluster_data["recommendations"]) if isinstance(r, dict)]
+            reco_md = "\n".join(
+                f"- **{SCOPE_BADGES.get(r.get('scope'), r.get('scope', ''))}** {r.get('action', '')}"
+                + (f" ({', '.join(map(str, r['targets']))})" if isinstance(r.get("targets"), list) and r["targets"] else "")
+                for r in recos
+            ) or "Aucune recommandation."
+            st.success(f"**Actions correctives / préventives préconisées :**\n\n{reco_md}")
 
         st.divider()
 
@@ -347,9 +535,8 @@ def main() -> None:
 
         source_counts = cluster_incidents["assignment_source"].value_counts().to_dict()
         st.caption(
-            f"Origine des affectations : "
-            f"**{source_counts.get('dense_cluster', 0)}** par clustering dense HDBSCAN, "
-            f"**{source_counts.get('llm_reassigned', 0)}** réassignés par l'agent LLM (Passe 2)."
+            "Origine des affectations : "
+            + (" · ".join(f"**{n}** {src}" for src, n in source_counts.items()) or "n/a")
         )
 
         show_incidents_cols = [
@@ -677,6 +864,7 @@ def main() -> None:
                 "equipment_id",
                 "site",
                 "total_incidents",
+                *(["severe_incidents"] if "severe_incidents" in filtered_eq.columns else []),
                 "mtbf_days",
                 "recurrence_rate_30d",
                 "total_cost_eur",

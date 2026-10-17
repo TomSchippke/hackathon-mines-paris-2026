@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-
+# Noms de colonnes du schéma d'entrée (contrat fixe : voir REQUIRED_COLUMNS dans pipeline.py)
 # Chemins d'entrée et de sortie par défaut
 DEFAULT_INPUT = Path("outputs/incidents_full.csv")
 FALLBACK_INPUT = Path("data/incidents_full.csv")
@@ -17,7 +17,6 @@ COST_COL = "estimated_cost_eur"
 DOWNTIME_COL = "downtime_hours"
 DATE_COL = "date"
 ID_COL = "incident_id"
-DEFAULT_SPLIT_COL = "asset_type"
 
 # Paramètres de clustering (UMAP & HDBSCAN)
 MIN_CLUSTER_SIZE = 10
@@ -37,3 +36,41 @@ FRENCH_STOPWORDS = [
     "afin", "plus", "après", "avant", "ou", "d", "l", "à", "avec", "sans", "son", "sa", "ses",
     "il", "elle", "ont", "être", "fait", "ainsi", "puis", "selon", "entre", "sous",
 ]
+
+# --- Clustering v2 (voir docs/implementation_plan_clustering_v2.md) ---
+
+# Littéraux propres au domaine : seul endroit où ils sont définis
+LANGUAGE = "fr"
+SEVERITY_ORDER = ["mineure", "modérée", "sévère"]  # rang 0 < 1 < 2
+PARTITION_COL = "asset_type"
+EQUIPMENT_COL = "equipment_id"
+SEVERITY_COL = "severity"
+OUTLIER_LABEL = "isole_atypique"
+RANDOM_STATE = 42
+
+# Profil de concentration (où agir) : lift vs part attendue + test binomial
+CONCENTRATION_COLS = ["site", "equipment_id"]
+CONCENTRATION_PERIOD = "Q"  # rafale temporelle par trimestre
+CONCENTRATION_MIN_LIFT = 1.5
+CONCENTRATION_MIN_OBS = 3
+CONCENTRATION_FDR = 0.10
+
+# Balayage HDBSCAN par partition, sélection par DBCV
+MCS_SWEEP = [5, 7, 10, 15, 20, 25]
+MIN_SAMPLES = None  # défaut hdbscan (= min_cluster_size)
+SWEEP_MAX_OUTLIER_RATE = 0.35  # réglages au-delà exclus de la sélection
+SWEEP_MIN_CLUSTERS = 2
+
+# Agent de fusion par remédiation
+MERGE_NEIGHBOURS = 4  # k plus proches centroïdes par cluster fin
+MERGE_MAX_GROUP = 8  # clusters max par prompt
+MERGE_MAX_ROUNDS = 3
+MERGE_DBCV_MAX_DROP = 0.15  # chute relative tolérée sans appel au critique
+MERGE_DBCV_HARD_DROP = 0.35  # au-delà : veto ferme, le critique ne peut pas l'outrepasser
+
+# Fouille de précurseurs (même équipement, fenêtre glissante, modèle nul par permutation)
+PRECURSOR_WINDOWS = [7, 30, 60]
+PRECURSOR_N_PERMUTATIONS = 10000  # plancher p = 1e-4 : à 1000, le BH sur ~200 tests rend q ≤ 0.05 inatteignable
+PRECURSOR_FDR = 0.05
+PRECURSOR_MIN_HITS = 5
+PRECURSOR_MIN_EQUIPMENTS = 3

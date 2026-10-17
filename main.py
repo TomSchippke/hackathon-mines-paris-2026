@@ -1,15 +1,19 @@
 """Pipeline complète, étape par étape :
 
-  1. pdf     extraction des rapports PDF (digitaux + scans OCR) -> outputs/incidents_full.csv
-  2. topics  topic modeling BERTopic sur tous les incidents     -> outputs/topics/
+  1. pdf           extraction des rapports PDF (digitaux + scans OCR) -> outputs/incidents_full.csv
+  2. topics        topic modeling BERTopic sur tous les incidents     -> outputs/topics/ (optionnel)
+  3. segmentation  clustering agentique des incidents                 -> outputs/segmentation/
+  4. equipment     analyse par équipement                             -> outputs/equipment/
+  5. webapp        application Streamlit de visualisation
 
 Chaque étape met ses résultats en cache dans outputs/cache/ : relancer ne refait que ce qui a
 changé (nouveaux PDF, nouveaux textes).
 
 Usage :
-    python main.py                    # toutes les étapes
-    python main.py --steps topics     # seulement le topic modeling
-    python main.py --min-cluster-size 15
+    python main.py                        # pdf, segmentation, equipment (défaut)
+    python main.py --steps topics         # seulement le topic modeling (optionnel)
+    python main.py --steps segmentation equipment webapp
+    python main.py --steps topics --min-cluster-size 15
 """
 
 from __future__ import annotations
@@ -31,10 +35,11 @@ STEPS = ["pdf", "topics", "segmentation", "equipment", "webapp"]
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--steps", nargs="+", choices=STEPS, default=["pdf", "topics", "segmentation", "equipment"], help="étapes à lancer")
+    parser.add_argument("--steps", nargs="+", choices=STEPS, default=["pdf", "segmentation", "equipment"], help="étapes à lancer")
     parser.add_argument("--csv", type=Path, default=pdf_config.DEFAULT_CSV, help="CSV des incidents")
     parser.add_argument("--out-dir", type=Path, default=Path("outputs"))
-    parser.add_argument("--min-cluster-size", type=int, default=topic_config.MIN_CLUSTER_SIZE)
+    parser.add_argument("--min-cluster-size", type=int, default=topic_config.MIN_CLUSTER_SIZE,
+                        help="taille minimale des clusters (étape topics uniquement)")
     args = parser.parse_args()
 
     os.chdir(Path(__file__).resolve().parent)  # chemins relatifs à la racine du repo
@@ -54,8 +59,6 @@ def main() -> None:
             run_agentic_segmentation(
                 input_csv=incidents_file,
                 out_dir=args.out_dir / "segmentation",
-                min_cluster_size=args.min_cluster_size,
-                split_col="asset_type",
             )
         elif step == "equipment":
             incidents_file = args.out_dir / "segmentation" / "incidents_segmented.csv"
