@@ -64,8 +64,8 @@ DIAGNOSIS_KEYS = ["problem_title", "problem_description", "common_cause", "commo
 OUTLIER_DIAGNOSIS = {
     "problem_title": "Incidents isolés et anomalies atypiques",
     "problem_description": "Ensemble d'incidents singuliers ne correspondant à aucun cluster récurrent établi.",
-    "common_cause": "Origines variées et non récurrentes (facteurs externes exceptionnels, signaux faibles).",
-    "system_impact": "Impacts ponctuels sans tendance systémique identifiée.",
+    "common_cause": "Non déterminée : ces incidents ne forment aucun groupe récurrent.",
+    "system_impact": "Non évalué.",
     "prevented_outcomes": [],
     "recommendations": [
         {

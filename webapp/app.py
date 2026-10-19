@@ -425,7 +425,7 @@ def tab_plan(cards: list[dict], n_isolated: int, n_unknown: int) -> None:
         part_f = st.segmented_control("Type d'installation", ["Tous", *PART.values()], default="Tous", key="ap_part")
     with c2:
         tier_f = st.segmented_control("Criticité", ["Toutes", *TIERS], default="Toutes", key="ap_tier")
-    q = st.text_input("Rechercher", "", placeholder="Rechercher (incendie, onduleur, Nord-2…)",
+    q = st.text_input("Rechercher", "", placeholder="Rechercher un mot, un site, un équipement…",
                       label_visibility="collapsed", key="ap_q").strip().lower()
 
     rev_part = {v: k for k, v in PART.items()}
@@ -719,20 +719,22 @@ def tab_equipment() -> None:
         })
 
 
-def tab_method(data: dict[str, pd.DataFrame], n_fine: int, n_isolated: int, n_unknown: int, n_nominal: int) -> None:
+def tab_method(data: dict[str, pd.DataFrame], n_fine: int, n_isolated: int, n_unknown: int, n_nominal: int,
+               per_equipment: float) -> None:
     conc, pairs = data["concentration"], data["pairs"]
     n_conc = int(_bool_series(conc, "significant").sum()) if not conc.empty else 0
     n_weak = int((conc["evidence_level"] == WEAK).sum()) if "evidence_level" in conc else 0
     tested = pairs[pairs["q_value"].notna() & (pairs["kind"] != "recurrence")] if not pairs.empty else pairs
     n_sig = int(_bool_series(tested, "significant").sum()) if not tested.empty else 0
     min_q = tested["q_value"].min() if not tested.empty else float("nan")
-    precursors = (f"Aucun n'est significatif (meilleure valeur q : {num(min_q, 2)}). Avec une trentaine d'incidents "
-                  "par équipement sur trois ans, un tel lien n'est pas détectable s'il est faible."
+    precursors = (f"Aucun n'est significatif (meilleure valeur q : {num(min_q, 2)}). Avec {num(per_equipment)} incidents "
+                  "en moyenne par équipement, un tel lien n'est pas détectable s'il est faible."
                   if n_sig == 0 else f"{n_sig} sont significatifs et apparaissent dans les fiches concernées.")
     st.html(f"""
 <div class="rp prose">
   <h2>Comment ces fiches sont construites</h2>
-  <p>Un LLM lit d'abord chaque rapport, sans le site ni la gravité, et en extrait la cause racine avec un extrait
+  <p>Un LLM lit d'abord la description de chaque rapport, sans aucune autre colonne (ni site, ni gravité, ni
+  météo, ni coût), et en extrait la cause racine avec un extrait
   recopié mot pour mot. Le code vérifie que l'extrait figure dans le rapport ; sinon, ou si le rapport ne dit pas
   pourquoi l'incident est arrivé, l'incident est classé « cause non précisée » ({n_unknown} incidents, hors fiches).</p>
   <p>Ce sont ces causes, et non les rapports entiers, qui sont converties en vecteurs sémantiques puis regroupées
@@ -803,7 +805,8 @@ def main() -> None:
     with t_equipment:
         tab_equipment()
     with t_method:
-        tab_method(data, len(data["fine"]), n_isolated, n_unknown, sum(c["nominal"] for c in cards))
+        tab_method(data, len(data["fine"]), n_isolated, n_unknown, sum(c["nominal"] for c in cards),
+                   len(incidents_df) / max(incidents_df["equipment_id"].nunique(), 1))
 
     st.html("<p class='rp footer'>Généré à partir des sorties de la pipeline <code>agentic_pipeline</code> "
             "(clustering v2) et <code>equipment_analysis</code>.</p>")

@@ -18,7 +18,7 @@ Ta tâche : juger si cette association est un vrai signal précurseur.
 - Propose un mécanisme causal ou de dégradation physiquement plausible reliant A à B sur le même équipement.
 - Propose une règle de surveillance concrète, de la forme : "si ≥ k incidents A en W jours sur un équipement → action".
 - Tu as EXPLICITEMENT le droit de répondre plausible=false si aucun mécanisme physique crédible n'existe (simple corrélation, coïncidence).
-- Si une cause commune externe (météo, tempête, vent fort, foudre, canicule, gel, panne réseau...) peut provoquer à la fois A et B, ce n'est PAS un lien précurseur : réponds plausible=false et commence le mécanisme par "cause commune externe: ".
+- Si une cause commune externe aux deux incidents peut provoquer à la fois A et B, ce n'est PAS un lien précurseur : réponds plausible=false et commence le mécanisme par "cause commune externe: ".
 - Si plausible=false, monitoring_rule doit être une chaîne vide.
 
 Réponds uniquement en JSON : {"plausible": true|false, "mechanism": "...", "monitoring_rule": "..."}"""

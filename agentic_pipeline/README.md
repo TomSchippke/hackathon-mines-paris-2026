@@ -99,9 +99,8 @@ et les escalades restent à l'intérieur d'une partition.
       sécurité déclenchée par une condition extérieure (`protection_only`) ? Le cluster est proposé
       nominal (`nominal_proposed`) si oui à la seconde et non à la première, et accepté (`nominal`)
       seulement si au moins `NOMINAL_MIN_MILD_SHARE` (80 %) de ses incidents sont au niveau de sévérité
-      le plus bas. Un cluster nominal n'a pas de recommandation. Un seul jugement global dans le prompt
-      du diagnostic s'est montré instable d'un essai à l'autre (fissures acceptées, arrêts de sécurité
-      refusés), d'où les deux questions séparées.
+      le plus bas. Un cluster nominal n'a pas de recommandation. Les prompts ne donnent aucun exemple de
+      défaut ni de condition extérieure : les exemples tirés des résultats orienteraient la réponse.
 11. **Criticité** (`criticality.py`) : classement Pareto des clusters fusionnés par coût et temps
     d'arrêt, isolés inclus.
 

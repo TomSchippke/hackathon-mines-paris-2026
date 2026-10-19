@@ -95,7 +95,6 @@ def _card_prompt(card: FineCard) -> str:
         f"Type d'actif : {card['partition']}\n"
         f"Taille : {card['size']} incidents\n"
         f"Mots-clés : {', '.join(card['keywords'])}\n"
-        f"Sévérités : {card['severity_distribution']}\n"
         f"Incidents représentatifs :\n{texts}\n"
     )
     consequences = card.get("representative_consequences") or []

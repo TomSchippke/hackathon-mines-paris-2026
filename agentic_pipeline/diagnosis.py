@@ -46,8 +46,7 @@ Format de réponse : un objet JSON STRICT avec les clés :
 SYSTEM_NOMINAL_PROMPT = """Tu es ingénieur fiabilité. On te donne des incidents d'un même groupe : pour chacun, \
 la cause et la conséquence extraites du rapport. Réponds en JSON :
 - "defect_found" : true si, dans la plupart de ces incidents, un défaut ou une dégradation a été constaté \
-sur l'équipement (fissure, usure, isolement dégradé, échauffement, pièce endommagée, dégât...), même \
-mineur ou découvert lors d'un contrôle ; false sinon.
+sur l'équipement, même mineur ou découvert lors d'un contrôle ; false sinon.
 - "protection_only" : true si, dans la plupart de ces incidents, la seule conséquence est l'arrêt ou le \
 déclenchement prévu d'une protection ou d'une mise en sécurité, en réaction à une condition extérieure \
 identifiée, suivi d'une reprise normale ; false sinon (déclenchement sans cause extérieure, dégât, panne).

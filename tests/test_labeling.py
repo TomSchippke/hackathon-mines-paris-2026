@@ -114,3 +114,10 @@ def test_default_label_empty_keywords_and_caps(no_llm):
     assert out["P_F7"]["fine_title"] == "P_F7"
     out = label_fine_clusters({"P_F7": card}, llm=lambda **kw: {"fine_title": "t" * 900, "failure_mode": "m" * 900})
     assert len(out["P_F7"]["fine_title"]) == 200 and len(out["P_F7"]["failure_mode"]) == 500
+
+
+def test_label_prompt_hides_severity():
+    from agentic_pipeline.labeling import _card_prompt
+    card = {"partition": "P", "size": 3, "keywords": ["a"], "representative_texts": ["cause"],
+            "severity_distribution": {"sévère": 3}}
+    assert "sévère" not in _card_prompt(card) and "Sévérit" not in _card_prompt(card)
