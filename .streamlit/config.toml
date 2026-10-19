@@ -1,0 +1,18 @@
+# Thème de webapp/app.py : même palette que le rapport outputs/plan_action.html
+[theme]
+base = "light"
+primaryColor = "#1d6a85"
+backgroundColor = "#f3f5f6"
+secondaryBackgroundColor = "#e9edef"
+textColor = "#18222a"
+borderColor = "#d6dde1"
+baseRadius = "6px"
+font = "'IBM Plex Sans':https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap, sans-serif"
+codeFont = "'IBM Plex Mono':https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&display=swap, monospace"
+headingFont = "'Barlow Condensed':https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&display=swap, sans-serif"
+
+[theme.sidebar]
+backgroundColor = "#ffffff"
+
+[client]
+toolbarMode = "viewer"

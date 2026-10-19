@@ -12,6 +12,7 @@ from agentic_pipeline.config import (
     CONCENTRATION_MIN_LIFT,
     CONCENTRATION_MIN_OBS,
     CONCENTRATION_PERIOD,
+    CONCENTRATION_STRONG_Q,
     DATE_COL,
     OUTLIER_LABEL,
     PARTITION_COL,
@@ -27,7 +28,9 @@ OUTPUT_COLUMNS = [
     "p_value",
     "q_value",
     "significant",
+    "evidence_level",
 ]
+STRONG, TO_VERIFY = "forte", "à vérifier"
 
 
 def _benjamini_hochberg(p_values: np.ndarray) -> np.ndarray:
@@ -64,6 +67,8 @@ def compute_concentration(
     Pour chaque cluster (hors outliers) et chaque dimension, l'effectif attendu est la taille
     du cluster multipliée par la part de la valeur dans la partition du cluster. Un test
     binomial unilatéral donne la p-value, corrigée par Benjamini-Hochberg au sein du cluster.
+    Une concentration significative a un niveau de preuve « forte » si q ≤ CONCENTRATION_STRONG_Q,
+    « à vérifier » sinon.
     """
     columns = [*CONCENTRATION_COLS, "period"]
     data = df[df[cluster_col].notna() & (df[cluster_col] != OUTLIER_LABEL)]
@@ -113,6 +118,10 @@ def compute_concentration(
         (out["q_value"] <= CONCENTRATION_FDR)
         & (out["lift"] >= CONCENTRATION_MIN_LIFT)
         & (out["observed"] >= CONCENTRATION_MIN_OBS)
+    )
+    # Niveau de preuve des concentrations significatives ; vide sinon
+    out["evidence_level"] = np.where(
+        ~out["significant"], "", np.where(out["q_value"] <= CONCENTRATION_STRONG_Q, STRONG, TO_VERIFY)
     )
     out = out.sort_values(["merged_cluster_id", "q_value"], kind="mergesort")
     return out[OUTPUT_COLUMNS].reset_index(drop=True)

@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 import pandas as pd
 
+from .concentration import TO_VERIFY
 from .llm_client import call_llm_json
 
 MAX_TEXTS_PER_FINE = 2
@@ -90,7 +91,7 @@ def build_diagnosis_context(
         c = c[_truthy(c["significant"])] if "significant" in c else c.iloc[0:0]
         for r in c.to_dict("records"):
             conc_rows.append({k: _clean(r.get(k)) for k in
-                              ("dimension", "value", "observed", "expected", "lift", "q_value")})
+                              ("dimension", "value", "observed", "expected", "lift", "q_value", "evidence_level")})
 
     rules: list[dict] = []
     if precursor_pairs is not None and len(precursor_pairs):
@@ -205,10 +206,13 @@ def _validate(result: Any, ctx: dict) -> dict:
         out["prevented_outcomes"] = [s.strip()[:500] for s in po if isinstance(s, str) and s.strip()]
 
     valid_by_scope = {"equipment": set(), "site": set()}
+    weak_by_scope = {"equipment": set(), "site": set()}
     for c in ctx.get("concentration", []):
         dim = {"equipment_id": "equipment", "site": "site"}.get(c.get("dimension"))
         if dim and c.get("value") is not None:
             valid_by_scope[dim].add(str(c["value"]))
+            if c.get("evidence_level") == TO_VERIFY:
+                weak_by_scope[dim].add(str(c["value"]))
     recs = result.get("recommendations")
     if isinstance(recs, list):
         for r in recs:
@@ -227,6 +231,8 @@ def _validate(result: Any, ctx: dict) -> dict:
                 "action": r["action"].strip()[:2000],
                 "scope": scope,
                 "targets": targets,
+                # cibles dont la concentration n'a qu'une preuve faible : à confirmer sur place
+                "targets_to_verify": [t for t in targets if t in weak_by_scope.get(scope, set())],
                 "rationale": _str(r.get("rationale"), ""),
             })
 

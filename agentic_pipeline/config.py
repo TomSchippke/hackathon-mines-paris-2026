@@ -54,6 +54,8 @@ CONCENTRATION_PERIOD = "Q"  # rafale temporelle par trimestre
 CONCENTRATION_MIN_LIFT = 1.5
 CONCENTRATION_MIN_OBS = 3
 CONCENTRATION_FDR = 0.10
+# Preuve forte si q ≤ ce seuil ; entre ce seuil et CONCENTRATION_FDR, la concentration est « à vérifier »
+CONCENTRATION_STRONG_Q = 0.05
 
 # Balayage HDBSCAN par partition, sélection par DBCV
 MCS_SWEEP = [5, 7, 10, 15, 20, 25]

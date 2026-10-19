@@ -13,6 +13,7 @@ def _ctx(**over):
     conc = pd.DataFrame([
         dict(merged_cluster_id=M, dimension="equipment_id", value="EQ-1", observed=5, expected=1, lift=5, p_value=.01, q_value=.02, significant=True),
         dict(merged_cluster_id=M, dimension="site", value="Lyon", observed=5, expected=1, lift=5, p_value=.01, q_value=.02, significant=False),
+        dict(merged_cluster_id=M, dimension="equipment_id", value="EQ-2", observed=4, expected=1, lift=4, p_value=.03, q_value=.08, significant=True, evidence_level="à vérifier"),
         dict(merged_cluster_id="Autre_M2", dimension="equipment_id", value="EQ-9", observed=5, expected=1, lift=5, p_value=.01, q_value=.02, significant=True),
     ])
     base = dict(kind="precursor", scope_cluster="", window_days=30, n_hits=6, n_equipments=4, lift=3.0, q_value=0.01,
@@ -40,7 +41,7 @@ def _ctx(**over):
 
 def test_context_filters(no_llm):
     ctx = _ctx()
-    assert [c["value"] for c in ctx["concentration"]] == ["EQ-1"]
+    assert [c["value"] for c in ctx["concentration"]] == ["EQ-1", "EQ-2"]
     ids = {r["rule_id"] for r in ctx["precursor_rules"]}
     assert ids == {"Pompe_M3->Pompe_M1@30d", "Pompe_F1->Pompe_F2@7d"}
     by = {r["rule_id"]: r for r in ctx["precursor_rules"]}
@@ -60,6 +61,7 @@ def test_invented_targets_and_rules_dropped(no_llm):
                 {"action": "a2", "scope": "equipment", "targets": ["EQ-FAKE"], "rationale": "r"},
                 {"action": "a3", "scope": "galaxy", "targets": ["EQ-1"], "rationale": "r"},
                 {"action": "a4", "scope": "fleet", "targets": ["EQ-1"], "rationale": "r"},
+                {"action": "a5", "scope": "equipment", "targets": ["EQ-1", "EQ-2"], "rationale": "r"},
             ],
             "early_warning_rules": [
                 {"rule_id": "Pompe_M3->Pompe_M1@30d", "rule": "x", "action": "y"},
@@ -73,6 +75,8 @@ def test_invented_targets_and_rules_dropped(no_llm):
     assert r[1]["scope"] == "fleet" and r[1]["targets"] == []
     assert r[2]["scope"] == "fleet" and r[2]["targets"] == []
     assert r[3]["scope"] == "fleet" and r[3]["targets"] == []
+    assert r[0]["targets_to_verify"] == []
+    assert r[4]["targets"] == ["EQ-1", "EQ-2"] and r[4]["targets_to_verify"] == ["EQ-2"]
     assert [x["rule_id"] for x in out["early_warning_rules"]] == ["Pompe_M3->Pompe_M1@30d"]
     assert out["prevented_outcomes"] == ["panne"]
 
@@ -134,7 +138,8 @@ def test_unhashable_llm_values_do_not_discard_response(no_llm):
             "problem_title": long, "problem_description": long,
             "recommendations": [
                 {"action": "ok", "scope": ["equipment"], "targets": [{"a": 1}, ["EQ-1"], "EQ-1"], "rationale": "r"},
-                {"action": "ok2", "scope": "equipment", "targets": ["EQ-1"], "rationale": "r"},
+                {"action": "ok2", "scope": "equipment", "targets": ["EQ-1"],
+                                          "targets_to_verify": [], "rationale": "r"},
             ],
             "early_warning_rules": [
                 {"rule_id": ["Pompe_M3->Pompe_M1@30d"], "rule": "x", "action": "y"},
@@ -145,6 +150,7 @@ def test_unhashable_llm_values_do_not_discard_response(no_llm):
 
     out = diagnose_merged_cluster(ctx, llm=llm)
     assert len(out["problem_title"]) == 200 and len(out["problem_description"]) == 2000
-    assert out["recommendations"][1] == {"action": "ok2", "scope": "equipment", "targets": ["EQ-1"], "rationale": "r"}
+    assert out["recommendations"][1] == {"action": "ok2", "scope": "equipment", "targets": ["EQ-1"],
+                                          "targets_to_verify": [], "rationale": "r"}
     assert out["recommendations"][0]["scope"] == "fleet"
     assert [x["rule_id"] for x in out["early_warning_rules"]] == ["Pompe_M3->Pompe_M1@30d"]

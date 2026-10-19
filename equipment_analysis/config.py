@@ -14,6 +14,11 @@ DEFAULT_OUT_DIR = Path("outputs/equipment")
 RECURRENCE_WINDOWS = [7, 15, 30, 60]
 DEFAULT_RECURRENCE_WINDOW = 30
 
+# Récidives comparées au hasard : dates d'un équipement redistribuées uniformément sur sa période d'activité
+RECURRENCE_N_SIMULATIONS = 2000
+RECURRENCE_FDR = 0.05  # Benjamini-Hochberg sur les équipements (resp. les techniciens), par fenêtre
+RANDOM_STATE = 42
+
 DATE_COL = "date"
 EQUIPMENT_COL = "equipment_id"
 TECHNICIAN_COL = "technician_id"

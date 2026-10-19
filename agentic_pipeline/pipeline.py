@@ -51,6 +51,7 @@ MERGED_COL = "merged_cluster_id"
 FINE_COL = "fine_cluster_id"
 CONCENTRATION_COLUMNS = [
     MERGED_COL, "dimension", "value", "observed", "expected", "lift", "p_value", "q_value", "significant",
+    "evidence_level",
 ]
 JSON_LIST_COLS = ["fine_cluster_ids", "prevented_outcomes", "recommendations", "early_warning_rules"]
 

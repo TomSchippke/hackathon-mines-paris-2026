@@ -41,11 +41,13 @@ def test_concentrated_cluster_is_significant():
     res = compute_concentration(pd.concat([bg, cl], ignore_index=True))
     assert list(res.columns) == [
         "merged_cluster_id", "dimension", "value", "observed", "expected",
-        "lift", "p_value", "q_value", "significant",
+        "lift", "p_value", "q_value", "significant", "evidence_level",
     ]
     row = res[(res.merged_cluster_id == "pump_M1") & (res.dimension == "equipment_id")
               & (res.value == "pump_E0")].iloc[0]
     assert row.significant and row.lift > 5
+    assert row.evidence_level == "forte"
+    assert (res.loc[~res.significant, "evidence_level"] == "").all()
     assert res.merged_cluster_id.is_monotonic_increasing
 
 
@@ -78,3 +80,21 @@ def test_outliers_excluded_and_partition_share_used():
     assert abs(r_valve.expected - 200 * 0.05) < 1e-9
     assert abs(r_pump.expected - 200 * (100 + (out.equipment_id == "E0").sum()) / 230) < 1e-9
     assert set(res[res.dimension == "period"].value.iloc[:1]).pop().count("Q") == 1
+
+
+def test_weak_concentration_is_flagged_to_verify():
+    # 9 incidents sur 16 à E0, qui pèse environ 25 % de la partition : significatif mais q > 0,05
+    bg = _background(400, "pump", n_equip=4, seed=7)
+    rng = np.random.default_rng(8)
+    cl = pd.DataFrame({
+        "asset_type": "pump",
+        "equipment_id": ["pump_E0"] * 9 + [f"pump_E{1 + i % 3}" for i in range(7)],
+        "site": "S0",
+        "date": pd.Timestamp("2023-01-01") + pd.to_timedelta(rng.integers(0, 1000, 16), unit="D"),
+        "merged_cluster_id": "pump_M1",
+    })
+    res = compute_concentration(pd.concat([bg, cl], ignore_index=True))
+    row = res[(res.merged_cluster_id == "pump_M1") & (res.dimension == "equipment_id")
+              & (res.value == "pump_E0")].iloc[0]
+    assert row.significant and 0.05 < row.q_value <= 0.10
+    assert row.evidence_level == "à vérifier"

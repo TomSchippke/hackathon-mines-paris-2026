@@ -5,16 +5,20 @@ from __future__ import annotations
 from typing import Sequence
 import numpy as np
 import pandas as pd
+from scipy.stats import binomtest
+
+from agentic_pipeline.concentration import _benjamini_hochberg
 
 from .config import (
     ASSET_COL,
-    CLUSTER_COL,
     COST_COL,
-    DATE_COL,
+    DEFAULT_RECURRENCE_WINDOW,
     DOWNTIME_COL,
     EQUIPMENT_COL,
-    ID_COL,
     PROBLEM_COL,
+    RANDOM_STATE,
+    RECURRENCE_FDR,
+    RECURRENCE_N_SIMULATIONS,
     RECURRENCE_WINDOWS,
     SEVERITY_COL,
     SITE_COL,
@@ -23,12 +27,41 @@ from .config import (
 )
 
 
+def _chance_recurrences(
+    dates: pd.Series,
+    windows: Sequence[int],
+    n_sim: int,
+    rng: np.random.Generator,
+) -> dict[int, tuple[float, float]]:
+    """Récidives attendues au hasard et p-value unilatérale, par fenêtre, pour un équipement.
+
+    Modèle nul : mêmes première et dernière dates, incidents intermédiaires tirés uniformément
+    entre les deux. Un équipement qui tombe souvent en panne a mécaniquement beaucoup d'intervalles
+    courts : seul l'excès par rapport à ce modèle signale une réparation qui ne tient pas.
+    """
+    days = np.sort((dates - dates.min()).dt.total_seconds().to_numpy() / 86400.0)
+    if len(days) < 3:
+        return {w: (float(np.sum(np.diff(days) <= w)), 1.0) for w in windows}
+    span = days[-1]
+    inner = np.sort(rng.uniform(0.0, span, size=(n_sim, len(days) - 2)), axis=1)
+    sims = np.hstack([np.zeros((n_sim, 1)), inner, np.full((n_sim, 1), span)])
+    gaps = np.diff(sims, axis=1)
+    out = {}
+    for w in windows:
+        observed = int(np.sum(np.diff(days) <= w))
+        null = np.sum(gaps <= w, axis=1)
+        out[w] = (float(null.mean()), float((1 + np.sum(null >= observed)) / (1 + n_sim)))
+    return out
+
+
 def compute_equipment_metrics(
     timeline_df: pd.DataFrame,
     windows: Sequence[int] = RECURRENCE_WINDOWS,
+    n_sim: int = RECURRENCE_N_SIMULATIONS,
 ) -> pd.DataFrame:
-    """Agrège les métriques de fiabilité, MTBF et récidive par équipement."""
+    """Agrège les métriques de fiabilité, MTBF et récidive (observée et attendue au hasard) par équipement."""
     records = []
+    rng = np.random.default_rng(RANDOM_STATE)
 
     for eq_id, group in timeline_df.groupby(EQUIPMENT_COL):
         total_incidents = len(group)
@@ -102,11 +135,25 @@ def compute_equipment_metrics(
             **rec_counts,
             **rec_rates,
         }
+        chance = _chance_recurrences(group["datetime"], windows, n_sim, rng)
+        for w in windows:
+            expected, p_value = chance[w]
+            rec[f"expected_recurrences_{w}d"] = round(expected, 1)
+            rec[f"excess_recurrences_{w}d"] = round(rec_counts[f"recurrences_{w}d"] - expected, 1)
+            rec[f"recurrence_p_{w}d"] = p_value
         records.append(rec)
 
     res_df = pd.DataFrame(records)
+    for w in windows:
+        if not res_df.empty:
+            res_df[f"recurrence_q_{w}d"] = _benjamini_hochberg(res_df[f"recurrence_p_{w}d"].to_numpy())
+            res_df[f"recurrence_above_chance_{w}d"] = (
+                (res_df[f"recurrence_q_{w}d"] <= RECURRENCE_FDR) & (res_df[f"excess_recurrences_{w}d"] > 0)
+            )
 
-    # Calcul d'un Bad Actor Score (normalisation Min-Max de coût, downtime et récidive 30j)
+    # Bad Actor Score : coût (40 %), indisponibilité (30 %) et récidives au-delà du hasard (30 %).
+    # Seul l'excès significatif compte : sans aucun équipement au-dessus du hasard, le score ne
+    # repose que sur le coût et l'indisponibilité (poids renormalisés).
     if not res_df.empty:
         c_norm = (res_df["total_cost_eur"] - res_df["total_cost_eur"].min()) / max(
             1e-5, (res_df["total_cost_eur"].max() - res_df["total_cost_eur"].min())
@@ -114,24 +161,49 @@ def compute_equipment_metrics(
         d_norm = (res_df["total_downtime_hours"] - res_df["total_downtime_hours"].min()) / max(
             1e-5, (res_df["total_downtime_hours"].max() - res_df["total_downtime_hours"].min())
         )
-        r_col = "recurrence_rate_30d"
-        r_norm = (res_df[r_col] - res_df[r_col].min()) / max(
-            1e-5, (res_df[r_col].max() - res_df[r_col].min())
-        )
+        w = DEFAULT_RECURRENCE_WINDOW
+        if f"recurrence_above_chance_{w}d" in res_df:
+            excess = res_df[f"excess_recurrences_{w}d"].where(res_df[f"recurrence_above_chance_{w}d"], 0.0)
+        else:
+            excess = pd.Series(0.0, index=res_df.index)
+        r_weight = 0.3 if excess.max() > 0 else 0.0
+        r_norm = excess / excess.max() if r_weight else excess
         res_df["bad_actor_score"] = (
-            (c_norm * 0.4 + d_norm * 0.3 + r_norm * 0.3) * 100
+            (c_norm * 0.4 + d_norm * 0.3 + r_norm * r_weight) / (0.7 + r_weight) * 100
         ).round(1)
 
     return res_df.sort_values(by="bad_actor_score", ascending=False).reset_index(drop=True)
+
+
+def _expected_vs_site(opps: pd.DataFrame, tech_id: str, flag_col: str) -> tuple[float, float]:
+    """Récidives attendues pour un technicien au taux des autres techniciens de ses sites, et p-value."""
+    if flag_col not in opps.columns or SITE_COL not in opps.columns:
+        return np.nan, np.nan
+    mine = opps[opps[TECHNICIAN_COL] == tech_id]
+    others = opps[(opps[TECHNICIAN_COL] != tech_id) & opps[SITE_COL].isin(mine[SITE_COL].unique())]
+    other_rate = others.groupby(SITE_COL)[flag_col].mean()
+    if mine.empty or not mine[SITE_COL].isin(other_rate.index).all():
+        return np.nan, np.nan
+    expected = float(mine[SITE_COL].map(other_rate).sum())
+    n, k = len(mine), int(mine[flag_col].sum())
+    p_value = binomtest(k, n, min(1.0, max(0.0, expected / n))).pvalue
+    return expected, float(p_value)
 
 
 def compute_technician_metrics(
     timeline_df: pd.DataFrame,
     windows: Sequence[int] = RECURRENCE_WINDOWS,
 ) -> pd.DataFrame:
-    """Évalue la qualité et l'efficacité des interventions par technicien."""
+    """Évalue la qualité et l'efficacité des interventions par technicien.
+
+    Le taux de récidive d'un technicien n'a de sens que comparé aux autres techniciens du même
+    site (mêmes machines, mêmes conditions) : pour chaque intervention, le taux attendu est celui
+    des autres techniciens de ce site. Test binomial bilatéral, puis Benjamini-Hochberg sur les
+    techniciens. Sans autre technicien sur le site, aucune comparaison n'est possible (NaN).
+    """
     if TECHNICIAN_COL not in timeline_df.columns:
         return pd.DataFrame()
+    opps = timeline_df[timeline_df["days_until_next_incident"].notna()]
 
     records = []
     for tech_id, group in timeline_df.groupby(TECHNICIAN_COL):
@@ -155,6 +227,11 @@ def compute_technician_metrics(
             valid_opp = len(post_delays)
             rate = round(cnt / valid_opp * 100, 1) if valid_opp > 0 else 0.0
             rec_data[f"post_recurrence_rate_{w}d"] = rate
+            expected, p_value = _expected_vs_site(opps, tech_id, f"followed_by_recurrence_{w}d")
+            rec_data[f"site_recurrence_rate_{w}d"] = (
+                round(expected / valid_opp * 100, 1) if valid_opp and not np.isnan(expected) else np.nan
+            )
+            rec_data[f"post_recurrence_p_vs_site_{w}d"] = p_value
 
         rec = {
             TECHNICIAN_COL: tech_id,
@@ -169,6 +246,15 @@ def compute_technician_metrics(
         records.append(rec)
 
     res_df = pd.DataFrame(records)
+    for w in windows:
+        p_col = f"post_recurrence_p_vs_site_{w}d"
+        if res_df.empty or p_col not in res_df:
+            continue
+        tested = res_df[p_col].notna()
+        q = pd.Series(np.nan, index=res_df.index)
+        q[tested] = _benjamini_hochberg(res_df.loc[tested, p_col].to_numpy())
+        res_df[f"post_recurrence_q_vs_site_{w}d"] = q
+        res_df[f"differs_from_site_{w}d"] = q <= RECURRENCE_FDR
     # Trier par taux de récidive 30j ascendant (meilleurs techniciens en premier)
     sort_col = "post_recurrence_rate_30d"
     if sort_col in res_df.columns:

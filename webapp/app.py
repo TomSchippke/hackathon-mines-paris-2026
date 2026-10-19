@@ -1,21 +1,28 @@
-"""Application web Streamlit pour visualiser et explorer la segmentation des incidents."""
+"""Application web Streamlit : plan d'action et exploration des incidents.
+
+Même rendu que le rapport statique `outputs/plan_action.html` (palette, typographie, fiches dépliables),
+avec en plus les vues interactives : Pareto, explorateur d'incidents, chronologie des équipements.
+
+    streamlit run webapp/app.py
+"""
 
 from __future__ import annotations
 
 import json
+from html import escape
 from pathlib import Path
 
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import plotly.io as pio
 import streamlit as st
 
-# Configuration de la page
 st.set_page_config(
-    page_title="Incident Intelligence | Segmentation & Criticité",
+    page_title="Plan d'action fiabilité PV & éolien",
     page_icon="⚡",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
 # Chemins des données
@@ -25,36 +32,181 @@ FINE_PATH = SEG_DIR / "clusters_fine.csv"
 CONCENTRATION_PATH = SEG_DIR / "concentration.csv"
 PRECURSOR_PAIRS_PATH = SEG_DIR / "precursor_pairs.csv"
 PRECURSOR_EVIDENCE_PATH = SEG_DIR / "precursor_evidence.csv"
-RUN_CMD = "python main.py --steps segmentation equipment"
-NO_PRECURSOR_MSG = (
-    "Aucun signal précurseur statistiquement significatif détecté sur la flotte — "
-    "les incidents de ce type ne sont pas précédés plus souvent que par hasard "
-    "d'un autre type d'incident sur le même équipement."
-)
-ISOLATED_ID = "isole_atypique"
-SCOPE_BADGES = {"fleet": "🌐 flotte", "site": "📍 site", "equipment": "⚙️ équipement"}
-INCIDENTS_PATH = Path("outputs/segmentation/incidents_segmented.csv")
+INCIDENTS_PATH = SEG_DIR / "incidents_segmented.csv"
 EQUIPMENT_SUMMARY_PATH = Path("outputs/equipment/equipment_summary.csv")
 EQUIPMENT_TIMELINE_PATH = Path("outputs/equipment/incidents_with_timeline.csv")
 TECHNICIAN_PERF_PATH = Path("outputs/equipment/technician_performance.csv")
+RUN_CMD = "python main.py --steps segmentation equipment"
+ISOLATED_ID = "isole_atypique"
+WEAK = "à vérifier"  # niveau de preuve d'une concentration significative mais faible (concentration.csv)
+RECURRENCE_WINDOWS = [7, 15, 30, 60]  # fenêtres calculées par equipment_analysis
 
-# Palette de couleurs par criticité
-TIER_COLORS = {
-    "Critique": "#EF4444",   # Rouge
-    "Élevée": "#F97316",     # Orange
-    "Moyenne": "#EAB308",    # Jaune
-    "Faible": "#10B981",     # Vert
+TIERS = ["Critique", "Élevée", "Moyenne", "Faible"]
+PART = {"solar": "Photovoltaïque", "wind": "Éolien"}
+DIM = {"site": "Site", "equipment_id": "Équipement", "period": "Trimestre"}
+SCOPE = {"fleet": "Flotte", "site": "Site", "equipment": "Équipement"}
+SEVERITIES = ["sévère", "modérée", "mineure"]
+MONTHS = ["janv.", "févr.", "mars", "avr.", "mai", "juin", "juil.", "août", "sept.", "oct.", "nov.", "déc."]
+
+# Palette du rapport HTML (mode clair)
+INK, MUTED, LINE, SUNKEN, ACCENT = "#18222a", "#5a6670", "#d6dde1", "#e9edef", "#1d6a85"
+TIER_COLORS = {"Critique": "#b8322a", "Élevée": "#c96a14", "Moyenne": "#9c7a10", "Faible": "#4f7560"}
+PART_COLORS = {"wind": ACCENT, "solar": "#c79a2e"}
+
+CSS = """
+@import url("https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap");
+:root {
+  --bg: #f3f5f6; --surface: #ffffff; --sunken: #e9edef; --ink: #18222a; --muted: #5a6670; --line: #d6dde1;
+  --accent: #1d6a85; --accent-soft: #dcebf1;
+  --crit: #b8322a; --elev: #c96a14; --moy: #9c7a10; --faible: #4f7560;
+  --font-display: "Barlow Condensed", "Arial Narrow", "Helvetica Neue", sans-serif;
+  --font-body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --font-data: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
 }
+/* Habillage Streamlit */
+html, body, .stApp, .stMarkdown, .stTextInput, .stSelectbox, .stMultiSelect, button { font-family: var(--font-body); }
+.stApp { background: var(--bg); }
+.block-container { max-width: 1100px; padding-top: 2.2rem; padding-bottom: 4rem; }
+[data-testid="stHeader"] { background: transparent; }
+.stTabs [data-baseweb="tab-list"] { gap: 4px; border-bottom: 1px solid var(--line); }
+.stTabs [data-baseweb="tab"] { padding: 10px 12px; }
+.stTabs [data-baseweb="tab"] p { font: 600 15px var(--font-body); color: var(--muted); }
+.stTabs [aria-selected="true"] p { color: var(--ink); }
+[data-testid="stWidgetLabel"] p { font-size: 13px; color: var(--muted); }
+[data-testid="stPlotlyChart"] { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; }
+
+/* Composants du rapport */
+.eyebrow { font-family: var(--font-data); font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.rp h1, .rp h2, .rp h3 { font-family: var(--font-display); font-weight: 700; line-height: 1.1; margin: 0; color: var(--ink); padding: 0; }
+.rp h1 { font-size: clamp(30px, 6vw, 44px); letter-spacing: 0.01em; }
+.rp h2 { font-size: 24px; }
+.rp-header { display: grid; gap: 12px; margin-bottom: 8px; }
+.lede { color: var(--muted); max-width: 70ch; margin: 0; font-size: 15px; line-height: 1.5; }
+.figures { display: flex; flex-wrap: wrap; gap: 10px 28px; padding: 6px 0 4px; }
+.fig { display: grid; }
+.fig b { font-family: var(--font-data); font-size: 20px; font-weight: 500; font-variant-numeric: tabular-nums; color: var(--ink); }
+.fig span { font-size: 13px; color: var(--muted); }
+.section { display: grid; gap: 6px; margin: 18px 0 6px; }
+.note { font-size: 13px; color: var(--muted); max-width: 75ch; margin: 0; line-height: 1.5; }
+.count { font-size: 13px; color: var(--muted); }
+
+.rp { color: var(--ink); font-size: 15px; line-height: 1.5; }
+.list { display: grid; gap: 10px; }
+details.card { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; }
+details.card > summary {
+  list-style: none; cursor: pointer; padding: 14px 16px;
+  display: grid; grid-template-columns: 2.4em minmax(0, 1fr); gap: 4px 12px;
+}
+details.card > summary::-webkit-details-marker { display: none; }
+details.card > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.rank { font-family: var(--font-data); font-size: 13px; color: var(--muted); padding-top: 3px; }
+.head { display: grid; gap: 6px; min-width: 0; }
+.title-row { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.card-title { font-family: var(--font-display); font-size: 21px; font-weight: 600; line-height: 1.15; }
+.tier { font: 600 11px var(--font-data); letter-spacing: 0.06em; text-transform: uppercase;
+  border: 1.5px solid currentColor; border-radius: 4px; padding: 1px 6px; white-space: nowrap; }
+.t-Critique { color: var(--crit); } .t-Élevée { color: var(--elev); } .t-Moyenne { color: var(--moy); } .t-Faible { color: var(--faible); }
+.meta { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.meta b { color: var(--ink); font-weight: 600; }
+.bar { height: 5px; background: var(--sunken); border-radius: 3px; overflow: hidden; }
+.bar i { display: block; height: 100%; border-radius: 3px; }
+.b-Critique { background: var(--crit); } .b-Élevée { background: var(--elev); } .b-Moyenne { background: var(--moy); } .b-Faible { background: var(--faible); }
+.body { border-top: 1px solid var(--line); padding: 16px; display: grid; gap: 18px; }
+.sec { display: grid; gap: 8px; min-width: 0; }
+.sec h3 { font-size: 16px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+.sec p { margin: 0; max-width: 70ch; }
+.sec ul { margin: 0; padding-left: 1.2em; display: grid; gap: 4px; }
+.rec { display: grid; gap: 4px; padding: 10px 12px; background: var(--sunken); border-radius: 6px; }
+.rec-top { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.scope { font: 500 11px var(--font-data); text-transform: uppercase; letter-spacing: 0.06em; padding: 1px 6px;
+  border-radius: 4px; background: var(--accent-soft); color: var(--accent); }
+.scope.fleet { background: transparent; color: var(--muted); border: 1px solid var(--line); }
+.targets { font-family: var(--font-data); font-size: 13px; }
+.why { font-size: 13px; color: var(--muted); }
+.weak { font: 500 11px var(--font-data); text-transform: uppercase; letter-spacing: 0.04em; color: var(--moy);
+  border: 1px solid currentColor; border-radius: 4px; padding: 0 5px; white-space: nowrap; }
+.modes { display: flex; flex-wrap: wrap; gap: 8px; }
+.mode { border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; display: grid; gap: 2px; flex: 1 1 220px; min-width: 0; }
+.mode small { color: var(--muted); font-family: var(--font-data); font-size: 12px; }
+
+.tablebox { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.rp table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 0; }
+.rp th, .rp td { text-align: left; padding: 8px 10px; border: 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+.rp th { font: 500 12px var(--font-data); color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; white-space: nowrap; background: none; }
+.rp td.num, .rp th.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--font-data); white-space: nowrap; }
+.rp tr:last-child td { border-bottom: 0; }
+.rp .mini th, .rp .mini td { padding: 5px 8px; }
+
+.prose { display: grid; gap: 12px; max-width: 70ch; }
+.prose p { margin: 0; }
+.callout { border-left: 3px solid var(--accent); padding: 10px 14px; background: var(--surface); border-radius: 0 6px 6px 0; }
+.report { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; display: grid; gap: 8px; }
+.report p { margin: 0; max-width: 75ch; }
+.footer { font-size: 12px; color: var(--muted); margin-top: 32px; }
+@media (prefers-reduced-motion: no-preference) { details.card[open] .body { animation: open .18s ease-out; } }
+@keyframes open { from { opacity: .4; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
+"""
+
+# Gabarit Plotly aux couleurs du rapport (fond transparent, grille discrète)
+pio.templates["rapport"] = go.layout.Template(layout=dict(
+    font=dict(family="IBM Plex Sans, Segoe UI, sans-serif", size=13, color=INK),
+    title=dict(font=dict(family="Barlow Condensed, Arial Narrow, sans-serif", size=20, color=INK), x=0, xanchor="left"),
+    paper_bgcolor="#ffffff", plot_bgcolor="#ffffff", separators=", ",
+    colorway=[ACCENT, "#c79a2e", "#4f7560", "#b8322a", "#7a5c99", "#5a6670"],
+    xaxis=dict(gridcolor=LINE, linecolor=LINE, zeroline=False, title=dict(font=dict(color=MUTED, size=12))),
+    yaxis=dict(gridcolor=LINE, linecolor=LINE, zeroline=False, title=dict(font=dict(color=MUTED, size=12))),
+    legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0, title=dict(text=""), font=dict(size=12, color=MUTED)),
+    hoverlabel=dict(font=dict(family="IBM Plex Sans, sans-serif", size=12), bgcolor="#ffffff", bordercolor=LINE),
+    margin=dict(l=10, r=10, t=50, b=10),
+))
+pio.templates.default = "plotly_white+rapport"
+RED_SCALE = [[0, SUNKEN], [0.5, "#c96a14"], [1, "#b8322a"]]
 
 
+# ---------------------------------------------------------------------------
+# Formatage (conventions françaises, comme le rapport HTML)
+# ---------------------------------------------------------------------------
+def num(v: float, d: int = 0) -> str:
+    return f"{v:,.{d}f}".replace(",", " ").replace(".", ",")
+
+
+def eur(v: float) -> str:
+    return f"{num(v)} €"
+
+
+def keur(v: float) -> str:
+    if v >= 1e6:
+        return f"{v / 1e6:.2f}".rstrip("0").rstrip(".").replace(".", ",") + " M€"
+    return f"{num(v / 1000)} k€"
+
+
+def month(d: pd.Timestamp) -> str:
+    return f"{MONTHS[d.month - 1]} {d.year}"
+
+
+def figures(items: list[tuple[str, str]]) -> str:
+    return '<div class="figures">' + "".join(f"<div class='fig'><b>{b}</b><span>{escape(s)}</span></div>"
+                                             for b, s in items) + "</div>"
+
+
+def section(title: str, note: str = "") -> None:
+    st.html(f"<div class='rp section'><h2>{escape(title)}</h2>"
+            + (f"<p class='note'>{escape(note)}</p>" if note else "") + "</div>")
+
+
+def chart(fig: go.Figure) -> None:
+    fig.update_layout(paper_bgcolor="#ffffff", plot_bgcolor="#ffffff")
+    st.plotly_chart(fig, theme=None, width="stretch", config={"displaylogo": False})
+
+
+# ---------------------------------------------------------------------------
+# Chargement des données
+# ---------------------------------------------------------------------------
 @st.cache_data
 def load_data() -> tuple[pd.DataFrame, pd.DataFrame]:
     """Charge les données de segmentation avec mise en cache Streamlit."""
     if not SUMMARY_PATH.exists() or not INCIDENTS_PATH.exists():
-        st.error(
-            f"Fichiers introuvables ({SUMMARY_PATH} ou {INCIDENTS_PATH}). "
-            f"Exécutez d'abord : `{RUN_CMD}`"
-        )
+        st.error(f"Fichiers introuvables ({SUMMARY_PATH} ou {INCIDENTS_PATH}). Exécutez d'abord : `{RUN_CMD}`")
         st.stop()
 
     summary_df = pd.read_csv(SUMMARY_PATH, keep_default_na=False, na_values=[""])
@@ -63,18 +215,16 @@ def load_data() -> tuple[pd.DataFrame, pd.DataFrame]:
     summary_df["cluster_id"] = summary_df["merged_cluster_id"]
     incidents_df = pd.read_csv(INCIDENTS_PATH)
 
-    # Conversion des types numériques
     for col in ["frequency", "criticality_rank"]:
         if col in summary_df.columns:
             summary_df[col] = pd.to_numeric(summary_df[col], errors="coerce")
     for col in ["mean_cost_eur", "total_cost_eur", "mean_downtime_hours", "total_downtime_hours"]:
         if col in summary_df.columns:
             summary_df[col] = pd.to_numeric(summary_df[col], errors="coerce").fillna(0.0)
-
     for col in ["estimated_cost_eur", "downtime_hours"]:
         if col in incidents_df.columns:
             incidents_df[col] = pd.to_numeric(incidents_df[col], errors="coerce").fillna(0.0)
-
+    incidents_df["date"] = pd.to_datetime(incidents_df["date"], errors="coerce")
     return summary_df, incidents_df
 
 
@@ -112,104 +262,6 @@ def load_action_plan_data() -> dict[str, pd.DataFrame]:
     return out
 
 
-def _bool_series(df: pd.DataFrame, col: str) -> pd.Series:
-    if col not in df.columns:
-        return pd.Series(False, index=df.index)
-    return df[col].astype(str).str.lower().isin(["true", "1"])
-
-
-def render_action_card(row: pd.Series, data: dict[str, pd.DataFrame], incidents_df: pd.DataFrame) -> None:
-    cid = row["merged_cluster_id"]
-    st.markdown(f"**Partition :** `{row['partition']}` · **Identifiant :** `{cid}` · "
-                f"**Arrêt cumulé :** {row['total_downtime_hours']:.0f} h")
-
-    st.markdown("##### 🔧 Remédiation / cause")
-    st.write(row.get("problem_description", ""))
-    st.info(f"**Cause commune :** {row.get('common_cause', '')}")
-
-    st.markdown("##### 🛡️ Défaillances évitées")
-    outcomes = parse_json_list(row.get("prevented_outcomes"))
-    if outcomes:
-        st.markdown("\n".join(f"- {o}" for o in outcomes))
-    else:
-        st.caption("Non renseigné.")
-
-    st.markdown("##### ✅ Recommandations")
-    recos = [r for r in parse_json_list(row.get("recommendations")) if isinstance(r, dict)]
-    if not recos:
-        st.caption("Aucune recommandation.")
-    for r in recos:
-        badge = SCOPE_BADGES.get(r.get("scope"), str(r.get("scope", "")))
-        targets = r.get("targets") if isinstance(r.get("targets"), list) else []
-        tgt = f" — cibles : {', '.join(f'`{t}`' for t in targets)}" if targets else ""
-        st.markdown(f"- **{badge}** {r.get('action', '')}{tgt}")
-        if r.get("rationale"):
-            st.caption(r["rationale"])
-
-    st.markdown("##### 🎯 Où agir")
-    conc = data["concentration"]
-    if not conc.empty and "merged_cluster_id" in conc.columns:
-        c = conc[(conc["merged_cluster_id"] == cid) & _bool_series(conc, "significant")]
-    else:
-        c = pd.DataFrame()
-    if c.empty:
-        st.caption("Aucune concentration significative (pas de site, équipement ou période sur-représenté).")
-    else:
-        st.dataframe(
-            c.sort_values("lift", ascending=False)[["dimension", "value", "observed", "expected", "lift", "q_value"]]
-            .rename(columns={"dimension": "Dimension", "value": "Valeur", "observed": "Observé",
-                             "expected": "Attendu", "lift": "Lift", "q_value": "q"}),
-            hide_index=True, use_container_width=True,
-            column_config={"Attendu": st.column_config.NumberColumn(format="%.1f"),
-                           "Lift": st.column_config.NumberColumn(format="%.2f"),
-                           "q": st.column_config.NumberColumn(format="%.4f")},
-        )
-
-    st.markdown("##### ⏳ Signaux précurseurs")
-    pairs = data["pairs"]
-    rules = pd.DataFrame()
-    if not pairs.empty:
-        mask = _bool_series(pairs, "significant") & _bool_series(pairs, "plausible")
-        into = (pairs.get("consequent") == cid) | (pairs.get("scope_cluster") == cid)
-        rules = pairs[mask & into]
-    if rules.empty:
-        st.info(NO_PRECURSOR_MSG)
-    else:
-        for _, p in rules.sort_values("lift", ascending=False).iterrows():
-            st.markdown(
-                f"- **{p['kind']}** : `{p['antecedent']}` → `{p['consequent']}` sous {p['window_days']} j — "
-                f"lift {p['lift']:.2f}, {p['n_equipments']} équipement(s), q={p['q_value']:.3f}"
-            )
-            if isinstance(p.get("monitoring_rule"), str):
-                st.caption(f"Règle de surveillance : {p['monitoring_rule']}")
-            if isinstance(p.get("mechanism"), str):
-                st.caption(f"Mécanisme : {p['mechanism']}")
-        ev = data["evidence"]
-        if not ev.empty and "consequent_incident_id" in ev.columns:
-            ids = set(incidents_df.loc[incidents_df["cluster_id"] == cid, "incident_id"])
-            ev_c = ev[ev["consequent_incident_id"].isin(ids)]
-            st.markdown(f"**Preuves : {len(ev_c)} cas observé(s)**")
-            if not ev_c.empty:
-                st.dataframe(ev_c, hide_index=True, use_container_width=True)
-        else:
-            st.caption("Aucune preuve détaillée disponible.")
-
-    st.markdown("##### 🧩 Modes de défaillance")
-    fine = data["fine"]
-    if not fine.empty and "merged_cluster_id" in fine.columns:
-        f = fine[fine["merged_cluster_id"] == cid]
-    else:
-        f = pd.DataFrame()
-    if f.empty:
-        st.caption("Aucun sous-cluster fin (incidents isolés ou non regroupés).")
-    else:
-        st.dataframe(
-            f[["fine_cluster_id", "fine_title", "size", "keywords"]]
-            .rename(columns={"fine_cluster_id": "ID", "fine_title": "Mode", "size": "Taille", "keywords": "Mots-clés"}),
-            hide_index=True, use_container_width=True,
-        )
-
-
 @st.cache_data
 def load_equipment_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Charge les données chronologiques d'équipements ou les calcule automatiquement à la volée."""
@@ -217,731 +269,514 @@ def load_equipment_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         from equipment_analysis.pipeline import run_equipment_analysis
         res = run_equipment_analysis()
         return res["equipment_df"], res["timeline_df"], res["technician_df"]
-
-    eq_df = pd.read_csv(EQUIPMENT_SUMMARY_PATH)
-    tl_df = pd.read_csv(EQUIPMENT_TIMELINE_PATH)
-    tech_df = pd.read_csv(TECHNICIAN_PERF_PATH)
-    return eq_df, tl_df, tech_df
+    return (pd.read_csv(EQUIPMENT_SUMMARY_PATH), pd.read_csv(EQUIPMENT_TIMELINE_PATH),
+            pd.read_csv(TECHNICIAN_PERF_PATH))
 
 
-def format_currency(val: float) -> str:
-    return f"{val:,.0f} €".replace(",", " ")
+def _bool_series(df: pd.DataFrame, col: str) -> pd.Series:
+    if col not in df.columns:
+        return pd.Series(False, index=df.index)
+    return df[col].astype(str).str.lower().isin(["true", "1"])
+
+
+def _rows(df: pd.DataFrame, mask: pd.Series | None = None) -> pd.DataFrame:
+    return df if df.empty or mask is None else df[mask]
+
+
+# ---------------------------------------------------------------------------
+# Fiches du plan d'action (même contenu que le rapport HTML)
+# ---------------------------------------------------------------------------
+@st.cache_data
+def build_cards(summary_df: pd.DataFrame, incidents_df: pd.DataFrame, data: dict[str, pd.DataFrame]) -> list[dict]:
+    """Une fiche par voie de remédiation, triée par criticité."""
+    conc, pairs, fine = data["concentration"], data["pairs"], data["fine"]
+    if not conc.empty:
+        conc = conc[_bool_series(conc, "significant")]
+    if not pairs.empty:
+        sig = pairs[_bool_series(pairs, "significant")]
+        rules = sig[_bool_series(sig, "plausible") & (sig["kind"] != "recurrence")]
+        recur = sig[(sig["kind"] == "recurrence") & _bool_series(sig, "is_best_window")]
+    else:
+        rules = recur = pairs
+    severity = pd.crosstab(incidents_df["merged_cluster_id"], incidents_df["severity"])
+
+    cards = []
+    rows = summary_df[summary_df["merged_cluster_id"] != ISOLATED_ID].sort_values("criticality_rank")
+    for _, r in rows.iterrows():
+        cid = r["merged_cluster_id"]
+        where = _rows(conc, conc["merged_cluster_id"] == cid if not conc.empty else None).sort_values("lift", ascending=False)
+        rr = _rows(rules, ((rules["consequent"] == cid) | (rules["scope_cluster"] == cid)) if not rules.empty else None)
+        rc = _rows(recur, (recur["antecedent"] == cid) if not recur.empty else None)
+        modes = _rows(fine, fine["merged_cluster_id"] == cid if not fine.empty else None)
+        cards.append({
+            "id": cid, "rank": int(r["criticality_rank"]), "partition": r["partition"], "tier": r["criticality_tier"],
+            "n": int(r["frequency"]), "cost": float(r["total_cost_eur"]), "mean_cost": float(r["mean_cost_eur"]),
+            "downtime": float(r["total_downtime_hours"]), "title": str(r["problem_title"]),
+            "description": str(r.get("problem_description") or ""), "cause": str(r.get("common_cause") or ""),
+            "impact": str(r.get("system_impact") or ""),
+            "severity": {k: int(severity.loc[cid, k]) for k in SEVERITIES
+                         if cid in severity.index and k in severity.columns and severity.loc[cid, k]},
+            "outcomes": [str(o) for o in parse_json_list(r.get("prevented_outcomes"))],
+            "recs": [x for x in parse_json_list(r.get("recommendations")) if isinstance(x, dict)],
+            "where": [{"dim": w["dimension"], "value": w["value"], "obs": int(w["observed"]),
+                       "exp": float(w["expected"]), "lift": float(w["lift"]),
+                       "weak": w.get("evidence_level") == WEAK} for _, w in where.iterrows()],
+            "rules": [{"rule": p.get("monitoring_rule") if isinstance(p.get("monitoring_rule"), str)
+                       else f"{p['antecedent']} → {p['consequent']}",
+                       "window": int(p["window_days"]), "lift": float(p["lift"]), "n_eq": int(p["n_equipments"])}
+                      for _, p in rr.iterrows()],
+            "recurrence": [{"window": int(p["window_days"]), "n_hits": int(p["n_hits"]),
+                            "n_eq": int(p["n_equipments"]), "lift": float(p["lift"])} for _, p in rc.iterrows()],
+            "modes": [{"title": m["fine_title"], "size": int(m["size"]),
+                       "keywords": [k for k in str(m.get("keywords") or "").split(";") if k][:4]}
+                      for _, m in modes.sort_values("size", ascending=False).iterrows()],
+        })
+    return cards
+
+
+def _target(t: str, weak: list) -> str:
+    return escape(str(t)) + (" <span class='weak'>à vérifier</span>" if t in weak else "")
+
+
+def card_html(c: dict, max_cost: float) -> str:
+    sev = ", ".join(f"{n} {k}{'s' if n > 1 else ''}" for k, n in c["severity"].items())
+    recs = "".join(
+        f"<div class='rec'><div class='rec-top'><span class='scope{' fleet' if r.get('scope') == 'fleet' else ''}'>"
+        f"{escape(SCOPE.get(r.get('scope'), str(r.get('scope', ''))))}</span>"
+        + (f"<span class='targets'>{', '.join(_target(t, r.get('targets_to_verify') or []) for t in r['targets'])}</span>"
+           if isinstance(r.get("targets"), list) and r["targets"] else "")
+        + f"</div><div>{escape(str(r.get('action', '')))}</div>"
+        + (f"<div class='why'>{escape(str(r['rationale']))}</div>" if r.get("rationale") else "") + "</div>"
+        for r in c["recs"])
+    if c["where"]:
+        where = ("<div class='tablebox'><table class='mini'><tr><th>Dimension</th><th>Valeur</th><th class='num'>Observé</th>"
+                 "<th class='num'>Attendu</th><th class='num'>Lift</th><th>Preuve</th></tr>"
+                 + "".join(f"<tr><td>{DIM.get(w['dim'], escape(w['dim']))}</td><td>{escape(str(w['value']))}</td>"
+                           f"<td class='num'>{w['obs']}</td><td class='num'>{num(w['exp'], 1)}</td>"
+                           f"<td class='num'>×{num(w['lift'], 1)}</td>"
+                           f"<td>{'<span class="weak">à vérifier</span>' if w['weak'] else 'forte'}</td></tr>"
+                           for w in c["where"])
+                 + "</table></div>"
+                 + ("<p class='note'>« À vérifier » : significatif mais avec une preuve faible (q entre 0,05 et 0,10) ; "
+                    "à confirmer sur place avant d'engager des moyens.</p>" if any(w["weak"] for w in c["where"]) else ""))
+    else:
+        where = ("<p class='note'>Aucune concentration significative : ce problème est réparti sur la flotte, "
+                 "la remédiation est à mener partout.</p>")
+    rules = ("<ul>" + "".join(f"<li>{escape(r['rule'])} <span class='why'>(fenêtre {r['window']} j, lift "
+                              f"×{num(r['lift'], 2)}, {r['n_eq']} équipements)</span></li>" for r in c["rules"]) + "</ul>"
+             if c["rules"] else
+             "<p class='note'>Aucun signal précurseur significatif : sur un même équipement, ces incidents ne sont "
+             "pas précédés d'un autre type d'incident plus souvent que par hasard.</p>")
+    recur = "".join(f"<p class='note'>Récidive détectée : {r['n_hits']} incidents de ce type surviennent dans les "
+                    f"{r['window']} jours suivant un incident identique sur le même équipement ({r['n_eq']} équipements, "
+                    f"lift ×{num(r['lift'], 2)}). Vérifier la qualité des réparations.</p>" for r in c["recurrence"])
+    modes = "".join(f"<div class='mode'><span>{escape(m['title'])}</span><small>{m['size']} incidents"
+                    + (" · " + escape(", ".join(m["keywords"])) if m["keywords"] else "") + "</small></div>"
+                    for m in c["modes"])
+    outcomes = ("<div class='sec'><h3>Défaillances évitées</h3><ul>"
+                + "".join(f"<li>{escape(o)}</li>" for o in c["outcomes"]) + "</ul></div>") if c["outcomes"] else ""
+    tier = escape(c["tier"])
+    return f"""
+<details class="card">
+  <summary>
+    <span class="rank">#{c['rank']}</span>
+    <div class="head">
+      <div class="title-row"><span class="tier t-{tier}">{tier}</span><span class="card-title">{escape(c['title'])}</span></div>
+      <div class="meta"><span>{PART.get(c['partition'], escape(c['partition']))}</span><span><b>{c['n']}</b> incidents</span>
+        <span><b>{eur(c['cost'])}</b></span><span>{num(c['downtime'])} h d'arrêt</span></div>
+      <div class="bar" aria-hidden="true"><i class="b-{tier}" style="width:{100 * c['cost'] / max_cost:.1f}%"></i></div>
+    </div>
+  </summary>
+  <div class="body">
+    <div class="sec"><h3>Problème et cause</h3><p>{escape(c['description'])}</p><p><b>Cause commune :</b> {escape(c['cause'])}</p>
+      {f"<p class='note'>Impact : {escape(c['impact'])}</p>" if c['impact'] else ""}
+      {f"<p class='note'>Gravité : {sev}. Coût moyen {eur(c['mean_cost'])} par incident.</p>" if sev else ""}</div>
+    {outcomes}
+    <div class="sec"><h3>Recommandations</h3>{recs or "<p class='note'>Aucune recommandation.</p>"}</div>
+    <div class="sec"><h3>Où agir en priorité</h3>{where}</div>
+    <div class="sec"><h3>Signaux précurseurs</h3>{rules}{recur}</div>
+    <div class="sec"><h3>Modes de défaillance regroupés</h3><div class="modes">{modes}</div></div>
+  </div>
+</details>"""
+
+
+# ---------------------------------------------------------------------------
+# Onglets
+# ---------------------------------------------------------------------------
+def tab_plan(cards: list[dict], n_isolated: int) -> None:
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        part_f = st.segmented_control("Type d'installation", ["Tous", *PART.values()], default="Tous", key="ap_part")
+    with c2:
+        tier_f = st.segmented_control("Criticité", ["Toutes", *TIERS], default="Toutes", key="ap_tier")
+    q = st.text_input("Rechercher", "", placeholder="Rechercher (incendie, onduleur, Nord-2…)",
+                      label_visibility="collapsed", key="ap_q").strip().lower()
+
+    rev_part = {v: k for k, v in PART.items()}
+    rows = [c for c in cards
+            if (part_f in (None, "Tous") or c["partition"] == rev_part.get(part_f))
+            and (tier_f in (None, "Toutes") or c["tier"] == tier_f)
+            and (not q or q in json.dumps([c["title"], c["description"], c["cause"], c["recs"], c["where"], c["modes"]],
+                                          ensure_ascii=False).lower())]
+    cost = sum(c["cost"] for c in rows)
+    st.html(f"<span class='count'>{len(rows)} fiche{'s' if len(rows) > 1 else ''} · {eur(cost)} · "
+            f"{n_isolated} incidents isolés non classés</span>")
+    max_cost = max((c["cost"] for c in cards), default=1.0) or 1.0
+    st.html("<div class='rp list'>" + ("".join(card_html(c, max_cost) for c in rows)
+                                       or "<p class='note'>Aucune fiche ne correspond à ces filtres.</p>") + "</div>")
+
+
+def tab_overview(summary_df: pd.DataFrame, incidents_df: pd.DataFrame) -> None:
+    total_cost = incidents_df["estimated_cost_eur"].sum()
+    st.html(figures([
+        (f"{num(incidents_df['downtime_hours'].sum())} h", "d'arrêt cumulé"),
+        (eur(incidents_df["estimated_cost_eur"].mean()), "coût moyen par incident"),
+        (num(len(summary_df)), "groupes (y compris isolés)"),
+    ]))
+
+    section("Pareto des coûts", "Chaque barre est une fiche, classée par coût cumulé ; la courbe donne la part "
+                                "cumulée du coût total. Le trait pointillé marque 80 %.")
+    s = summary_df.sort_values("total_cost_eur", ascending=False).copy()
+    s["cum_ratio"] = 100 * s["total_cost_eur"].cumsum() / total_cost
+    s["label"] = [f"#{int(r)}" for r in s["criticality_rank"]]
+    fig = go.Figure()
+    fig.add_bar(x=s["label"], y=s["total_cost_eur"], name="Coût total",
+                marker=dict(color=[TIER_COLORS.get(t, MUTED) for t in s["criticality_tier"]]),
+                customdata=s["problem_title"], hovertemplate="<b>%{customdata}</b><br>%{y:,.0f} €<extra></extra>")
+    fig.add_scatter(x=s["label"], y=s["cum_ratio"], name="Part cumulée du coût", yaxis="y2", mode="lines+markers",
+                    line=dict(color=INK, width=2), marker=dict(size=5),
+                    hovertemplate="Cumul : %{y:.1f} %<extra></extra>")
+    fig.add_hline(y=80, yref="y2", line=dict(color=MUTED, dash="dot", width=1))
+    fig.update_layout(height=420, hovermode="x unified", margin=dict(r=50), xaxis=dict(type="category", tickfont=dict(size=11)),
+                      yaxis=dict(title="Coût (€)", tickformat="~s"),
+                      yaxis2=dict(overlaying="y", side="right", range=[0, 105], tickvals=[0, 20, 40, 60, 80, 100],
+                                  ticktext=[f"{v} %" for v in range(0, 101, 20)], showgrid=False))
+    chart(fig)
+
+    col1, col2 = st.columns([6, 5])
+    with col1:
+        section("Fréquence et coût moyen", "Taille des bulles : heures d'arrêt cumulées.")
+        fig = px.scatter(summary_df, x="frequency", y="mean_cost_eur", size="total_downtime_hours",
+                         color="criticality_tier", color_discrete_map=TIER_COLORS, category_orders={"criticality_tier": TIERS},
+                         hover_name="problem_title", size_max=34,
+                         hover_data={"frequency": True, "mean_cost_eur": ":,.0f", "total_cost_eur": ":,.0f",
+                                     "total_downtime_hours": ":,.0f", "criticality_tier": False},
+                         labels={"frequency": "Incidents", "mean_cost_eur": "Coût moyen (€)",
+                                 "total_downtime_hours": "Arrêt (h)", "total_cost_eur": "Coût total (€)"})
+        fig.update_traces(marker=dict(line=dict(width=1, color="#ffffff"), opacity=0.9))
+        fig.update_layout(height=400, xaxis_type="log", yaxis=dict(type="log", tickformat="~s"))
+        chart(fig)
+    with col2:
+        section("Coût par site", "Coût cumulé des incidents de chaque site.")
+        site_cost = (incidents_df.groupby(["site", "asset_type"])["estimated_cost_eur"].sum()
+                     .reset_index().sort_values("estimated_cost_eur"))
+        site_cost["Type"] = site_cost["asset_type"].map(PART).fillna(site_cost["asset_type"])
+        fig = px.bar(site_cost, y="site", x="estimated_cost_eur", color="Type", orientation="h",
+                     color_discrete_map={PART[k]: v for k, v in PART_COLORS.items()},
+                     labels={"estimated_cost_eur": "Coût (€)", "site": ""})
+        fig.update_layout(height=400, xaxis_tickformat="~s", bargap=0.35)
+        chart(fig)
+
+    section("Toutes les fiches")
+    tier_filter = st.multiselect("Criticité", TIERS, default=["Critique", "Élevée"], key="ov_tier", placeholder="Toutes")
+    view = summary_df[summary_df["criticality_tier"].isin(tier_filter)] if tier_filter else summary_df
+    st.dataframe(
+        view[["criticality_rank", "criticality_tier", "partition", "problem_title", "frequency", "total_cost_eur",
+              "mean_cost_eur", "total_downtime_hours", "common_cause"]].sort_values("criticality_rank"),
+        hide_index=True, width="stretch", height=360,
+        column_config={
+            "criticality_rank": st.column_config.NumberColumn("Rang", width="small"),
+            "criticality_tier": st.column_config.TextColumn("Criticité"),
+            "partition": st.column_config.TextColumn("Type"),
+            "problem_title": st.column_config.TextColumn("Fiche", width="large"),
+            "frequency": st.column_config.NumberColumn("Incidents"),
+            "total_cost_eur": st.column_config.NumberColumn("Coût total", format="%.0f €"),
+            "mean_cost_eur": st.column_config.NumberColumn("Coût moyen", format="%.0f €"),
+            "total_downtime_hours": st.column_config.NumberColumn("Arrêt", format="%.0f h"),
+            "common_cause": st.column_config.TextColumn("Cause commune", width="large"),
+        },
+    )
+
+
+def tab_incidents(summary_df: pd.DataFrame, incidents_df: pd.DataFrame) -> None:
+    titles = summary_df.sort_values("criticality_rank").set_index("cluster_id")["problem_title"].to_dict()
+    c1, c2, c3 = st.columns([2, 1, 1])
+    with c1:
+        cluster_f = st.selectbox("Fiche", ["Toutes", *titles], key="in_cluster",
+                                 format_func=lambda c: c if c == "Toutes" else titles[c])
+    with c2:
+        site_f = st.multiselect("Site", sorted(incidents_df["site"].dropna().unique()), key="in_site", placeholder="Tous")
+    with c3:
+        sev_f = st.multiselect("Gravité", SEVERITIES, key="in_sev", placeholder="Toutes")
+    query = st.text_input("Recherche", "", placeholder="Rechercher dans le texte des rapports (ex. foudre, onduleur)",
+                          label_visibility="collapsed", key="in_q").strip()
+
+    df = incidents_df
+    if cluster_f != "Toutes":
+        df = df[df["cluster_id"] == cluster_f]
+    if site_f:
+        df = df[df["site"].isin(site_f)]
+    if sev_f:
+        df = df[df["severity"].isin(sev_f)]
+    if query:
+        df = df[df["text"].str.contains(query, case=False, na=False, regex=False)]
+
+    sources = df["assignment_source"].value_counts().to_dict()
+    st.html(figures([
+        (f"{num(len(df))} / {num(len(incidents_df))}", "incidents"),
+        (keur(df["estimated_cost_eur"].sum()), "coût"),
+        (f"{num(df['downtime_hours'].sum())} h", "d'arrêt"),
+        (num(df["cluster_id"].nunique()), "fiches touchées"),
+    ]) + ("<p class='note'>Affectation : " + " · ".join(f"{n} {escape(str(s))}" for s, n in sources.items()) + "</p>"
+          if sources else ""))
+
+    cols = [c for c in ["incident_id", "date", "site", "equipment_id", "severity", "problem_title", "estimated_cost_eur",
+                        "downtime_hours", "weather_condition", "assignment_source"] if c in df.columns]
+    st.dataframe(df[cols].sort_values("date"), hide_index=True, width="stretch", height=340, column_config={
+        "incident_id": st.column_config.NumberColumn("N°", format="%d"),
+        "date": st.column_config.DateColumn("Date", format="DD/MM/YYYY"),
+        "site": "Site", "equipment_id": "Équipement", "severity": "Gravité",
+        "problem_title": st.column_config.TextColumn("Fiche", width="large"),
+        "estimated_cost_eur": st.column_config.NumberColumn("Coût", format="%.0f €"),
+        "downtime_hours": st.column_config.NumberColumn("Arrêt", format="%.1f h"),
+        "weather_condition": "Météo", "assignment_source": "Affectation",
+    })
+    st.download_button("Télécharger la sélection (CSV)", df.to_csv(index=False).encode("utf-8"),
+                       file_name="incidents_selection.csv", mime="text/csv")
+
+    section("Lire un rapport")
+    ids = df.sort_values("date")["incident_id"].tolist()
+    if not ids:
+        st.html("<p class='note'>Aucun incident ne correspond à ces filtres.</p>")
+        return
+    by_id = df.set_index("incident_id")
+    inc_id = st.selectbox("Incident", ids, key="in_id", label_visibility="collapsed",
+                          format_func=lambda i: f"N° {i} · {by_id.at[i, 'site']} · {by_id.at[i, 'severity']} · "
+                                                f"{by_id.at[i, 'date']:%d/%m/%Y}")
+    inc = by_id.loc[inc_id]
+    meta = " · ".join(escape(str(x)) for x in [inc.get("equipment_id"), inc.get("technician_id"),
+                                                inc.get("weather_condition"), inc.get("document_format")] if pd.notna(x))
+    st.html(f"<div class='rp report'><div class='title-row'><span class='tier t-{escape(str(inc['cluster_criticality_tier']))}'>"
+            f"{escape(str(inc['cluster_criticality_tier']))}</span><span class='card-title'>{escape(str(inc['problem_title']))}</span></div>"
+            f"<div class='meta'><span>{meta}</span><span><b>{eur(inc['estimated_cost_eur'])}</b></span>"
+            f"<span>{num(inc['downtime_hours'], 1)} h d'arrêt</span></div><p>{escape(str(inc['text']))}</p></div>")
+
+
+def tab_equipment() -> None:
+    eq_df, tl_df, tech_df = load_equipment_data()
+    eq_df = eq_df.sort_values("bad_actor_score", ascending=False)
+
+    fc1, fc2, fc3 = st.columns([1, 1, 2])
+    with fc1:
+        eq_site = st.selectbox("Site", ["Tous", *sorted(eq_df["site"].dropna().unique())], key="eq_site")
+    with fc2:
+        eq_part = st.selectbox("Type d'installation", ["Tous", *sorted(eq_df["asset_type"].dropna().unique())],
+                               key="eq_part", format_func=lambda p: PART.get(p, p))
+    with fc3:
+        w = st.select_slider("Fenêtre de récidive (jours après l'incident précédent)", RECURRENCE_WINDOWS, value=30,
+                             key="eq_rec", help="Un incident survenant moins de N jours après le précédent sur la "
+                                                "même machine est compté comme récidive.")
+
+    eq = eq_df
+    if eq_site != "Tous":
+        eq = eq[eq["site"] == eq_site]
+    if eq_part != "Tous":
+        eq = eq[eq["asset_type"] == eq_part]
+    above = eq[f"recurrence_above_chance_{w}d"].astype(bool)
+
+    tl = tl_df.copy()
+    tl["datetime"] = pd.to_datetime(tl["date"])
+    tl["is_rec"] = tl["days_since_last_incident"].notna() & (tl["days_since_last_incident"] <= w)
+    st.html(figures([
+        (num(len(eq)), "équipements"),
+        (f"{num(eq['mtbf_days'].mean() if len(eq) else 0, 1)} j", "MTBF moyen"),
+        (num(eq[f"recurrences_{w}d"].sum()), f"récidives sous {w} j"),
+        (num(eq[f"expected_recurrences_{w}d"].sum()), "attendues au hasard"),
+        (num(int(above.sum())), "équipements au-dessus du hasard"),
+    ]))
+    if not above.any():
+        st.html("<div class='rp callout'><p><b>Pas de réparation qui ne tient pas détectée.</b> Une machine qui tombe "
+                "souvent en panne a mécaniquement beaucoup d'incidents rapprochés. Comparé à des pannes réparties au "
+                f"hasard sur sa période d'activité, aucun équipement ne rechute plus souvent sous {w} jours : les "
+                "rechutes rapides s'expliquent par la fréquence des pannes, pas par la qualité des réparations.</p></div>")
+
+    section("Équipements à surveiller", "Score « bad actor » : coût cumulé (40 %), indisponibilité cumulée (30 %) et "
+                                        "récidives au-delà du hasard sous 30 jours (30 %). Sans aucun équipement "
+                                        "au-dessus du hasard, le score ne repose que sur le coût et l'indisponibilité.")
+    top = eq.head(20)
+    st.html("<div class='rp tablebox'><table><tr><th>Équipement</th><th>Site</th><th class='num'>Incidents</th>"
+            "<th class='num'>Sévères</th><th class='num'>Coût</th><th class='num'>MTBF</th>"
+            f"<th class='num'>Récidives {w} j<br>obs. / hasard</th><th class='num'>Score</th>"
+            "<th>Problème le plus fréquent</th></tr>"
+            + "".join(f"<tr><td class='num' style='text-align:left'>{escape(str(e['equipment_id']))}</td>"
+                      f"<td style='white-space:nowrap'>{escape(str(e['site']))}</td><td class='num'>{int(e['total_incidents'])}</td>"
+                      f"<td class='num'>{int(e.get('severe_incidents', 0))}</td><td class='num'>{keur(e['total_cost_eur'])}</td>"
+                      f"<td class='num'>{num(e['mtbf_days'], 1)} j</td>"
+                      f"<td class='num'>{int(e[f'recurrences_{w}d'])} / {num(e[f'expected_recurrences_{w}d'])}"
+                      + (" <span class='weak'>au-dessus</span>" if e[f"recurrence_above_chance_{w}d"] else "") + "</td>"
+                      f"<td class='num'>{num(e['bad_actor_score'], 1)}</td><td>{escape(str(e.get('most_frequent_problem', '')))}</td></tr>"
+                      for _, e in top.iterrows())
+            + "</table></div>")
+
+    fig = px.scatter(eq, x="mtbf_days", y="total_cost_eur", size="total_incidents", color="bad_actor_score",
+                     color_continuous_scale=RED_SCALE, hover_name="equipment_id",
+                     hover_data={"site": True, "total_incidents": True, f"recurrences_{w}d": True,
+                                 f"expected_recurrences_{w}d": ":.0f"},
+                     labels={"mtbf_days": "MTBF (jours)", "total_cost_eur": "Coût cumulé (€)",
+                             "bad_actor_score": "Score", "total_incidents": "Incidents",
+                             f"recurrences_{w}d": f"Récidives {w} j", f"expected_recurrences_{w}d": "Attendues au hasard"},
+                     title="MTBF et coût cumulé par équipement")
+    fig.update_traces(marker=dict(line=dict(width=1, color="#ffffff")))
+    fig.update_layout(height=400, yaxis_tickformat="~s", coloraxis_colorbar=dict(thickness=10, len=0.6))
+    chart(fig)
+
+    section("Chronologie d'un équipement")
+    if eq.empty:
+        st.html("<p class='note'>Aucun équipement pour ces filtres.</p>")
+    else:
+        by_eq = eq.set_index("equipment_id")
+        selected = st.selectbox("Équipement", eq["equipment_id"].tolist(), key="eq_id", label_visibility="collapsed",
+                                format_func=lambda x: f"{x} · {by_eq.at[x, 'site']} · {by_eq.at[x, 'total_incidents']} incidents")
+        info = by_eq.loc[selected]
+        line = tl[tl["equipment_id"] == selected].sort_values("datetime").copy()
+        st.html(figures([
+            (num(info["total_incidents"]), "incidents"),
+            (f"{num(info['mtbf_days'], 1)} j", "MTBF"),
+            (f"{int(info[f'recurrences_{w}d'])} / {num(info[f'expected_recurrences_{w}d'])}",
+             f"récidives sous {w} j (obs. / hasard)"),
+            (keur(info["total_cost_eur"]), "coût cumulé"),
+            (escape(str(info["most_frequent_technician"])), "technicien le plus fréquent"),
+        ]))
+        rec_label, first_label = f"Récidive (< {w} j)", "Incident isolé ou premier"
+        line["Statut"] = line["is_rec"].map({True: rec_label, False: first_label})
+        hover = {c: True for c in ["severity", "technician_id", "problem_title"] if c in line.columns}
+        fig = px.scatter(line, x="datetime", y="days_since_last_incident", color="Statut", size="downtime_hours",
+                         color_discrete_map={rec_label: TIER_COLORS["Critique"], first_label: ACCENT},
+                         hover_data={"datetime": "|%d/%m/%Y", "days_since_last_incident": ":.0f",
+                                     "downtime_hours": ":.1f", **hover},
+                         labels={"datetime": "Date", "days_since_last_incident": "Jours depuis l'incident précédent",
+                                 "downtime_hours": "Arrêt (h)", "severity": "Gravité", "technician_id": "Technicien",
+                                 "problem_title": "Fiche"},
+                         title=f"{selected} : taille des points = durée d'arrêt")
+        fig.add_hline(y=w, line=dict(color=TIER_COLORS["Critique"], dash="dot", width=1),
+                      annotation_text=f"seuil {w} j", annotation_position="bottom right",
+                      annotation_font=dict(size=11, color=MUTED))
+        fig.update_layout(height=400, margin=dict(t=90), legend=dict(y=1.06))
+        chart(fig)
+
+    section("Récidive après intervention, par technicien",
+            "Chaque technicien est comparé aux autres techniciens de son site (mêmes machines, mêmes conditions) : "
+            "part de ses interventions suivies d'un nouvel incident sur la même machine dans la fenêtre choisie.")
+    rate, site_rate = f"post_recurrence_rate_{w}d", f"site_recurrence_rate_{w}d"
+    differs, q_col = f"differs_from_site_{w}d", f"post_recurrence_q_vs_site_{w}d"
+    tech = tech_df.copy()
+    tech["Écart"] = tech[rate] - tech[site_rate]
+    tech["Verdict"] = [("Plus de récidives" if gap > 0 else "Moins de récidives") if d
+                       else ("Pas de comparaison possible" if pd.isna(gap) else "Comme le site")
+                       for d, gap in zip(tech[differs].astype(bool), tech["Écart"])]
+    if not tech[differs].astype(bool).any():
+        st.html("<div class='rp callout'><p><b>Aucun technicien ne se distingue de son site.</b> Les écarts observés "
+                "restent dans ce que le hasard produit avec une centaine d'interventions par personne : ce classement "
+                "ne permet pas de juger la qualité du travail d'un technicien.</p></div>")
+    tech = tech.sort_values("Écart")
+    fig = go.Figure(go.Bar(
+        x=tech["Écart"], y=tech["technician_id"], orientation="h",
+        marker_color=[TIER_COLORS["Critique"] if d else MUTED for d in tech[differs].astype(bool)],
+        hovertemplate="%{y}<br>Écart au site : %{x:+.1f} pts<extra></extra>"))
+    fig.update_layout(height=440, title="Écart au taux des autres techniciens du site (points)",
+                      xaxis=dict(ticksuffix=" pts", zeroline=True, zerolinecolor=INK))
+    chart(fig)
+    st.dataframe(
+        tech[["technician_id", "sites", "total_interventions", rate, site_rate, "Écart", q_col, "Verdict"]]
+        .sort_values("Écart", ascending=False),
+        hide_index=True, width="stretch", height=420, column_config={
+            "technician_id": "Technicien", "sites": "Site", "total_interventions": "Interventions",
+            rate: st.column_config.NumberColumn("Taux", format="%.1f %%"),
+            site_rate: st.column_config.NumberColumn("Taux du site", format="%.1f %%"),
+            "Écart": st.column_config.NumberColumn(format="%+.1f pts"),
+            q_col: st.column_config.NumberColumn("q", format="%.2f"),
+        })
+
+
+def tab_method(data: dict[str, pd.DataFrame], n_fine: int, n_isolated: int) -> None:
+    conc, pairs = data["concentration"], data["pairs"]
+    n_conc = int(_bool_series(conc, "significant").sum()) if not conc.empty else 0
+    n_weak = int((conc["evidence_level"] == WEAK).sum()) if "evidence_level" in conc else 0
+    tested = pairs[pairs["q_value"].notna() & (pairs["kind"] != "recurrence")] if not pairs.empty else pairs
+    n_sig = int(_bool_series(tested, "significant").sum()) if not tested.empty else 0
+    min_q = tested["q_value"].min() if not tested.empty else float("nan")
+    precursors = (f"Aucun n'est significatif (meilleure valeur q : {num(min_q, 2)}). Avec une trentaine d'incidents "
+                  "par équipement sur trois ans, un tel lien n'est pas détectable s'il est faible."
+                  if n_sig == 0 else f"{n_sig} sont significatifs et apparaissent dans les fiches concernées.")
+    st.html(f"""
+<div class="rp prose">
+  <h2>Comment ces fiches sont construites</h2>
+  <p>Chaque rapport d'incident est converti en vecteur sémantique, puis regroupé par type d'installation
+  (photovoltaïque, éolien) avec HDBSCAN. La taille minimale des groupes est choisie automatiquement par le score DBCV,
+  ce qui donne {n_fine} modes de défaillance fins.</p>
+  <p>Un agent LLM fusionne ensuite les modes qui relèvent d'une même correction concrète. Une fusion qui dégrade
+  fortement la cohérence des groupes doit être confirmée par un second appel critique nommant un seul composant et
+  une seule action ; au-delà de 35 % de dégradation, elle est refusée d'office.</p>
+  <p>Pour chaque fiche, un test binomial compare la part des incidents de chaque site, équipement et trimestre à leur
+  part attendue ({n_conc} concentrations significatives au total, dont {n_weak} « à vérifier » : q entre 0,05 et
+  0,10, soit une preuve faible à confirmer sur place). Les recommandations ne peuvent cibler que ces sites ou
+  équipements.</p>
+  <p>Les récidives d'un équipement sont comparées à ce que le hasard produirait : mêmes nombres d'incidents et même
+  période d'activité, dates tirées uniformément (2 000 simulations, correction de Benjamini-Hochberg). Un technicien
+  est comparé aux autres techniciens de son site, jamais à la flotte, car chaque site a ses propres machines et
+  conditions.</p>
+  <div class="callout"><p><b>Signaux précurseurs.</b> {num(len(tested))} enchaînements « incident A puis incident B sur
+  le même équipement » ont été testés contre 10 000 permutations aléatoires des historiques. {precursors}</p></div>
+  <p>Les {n_isolated} incidents isolés ne ressemblent à aucun groupe et ne figurent dans aucune fiche.</p>
+</div>""")
 
 
 def main() -> None:
+    st.html(f"<style>{CSS}</style>")
     summary_df, incidents_df = load_data()
-
-    # Barre latérale
-    st.sidebar.title("⚡ Incident Intelligence")
-    st.sidebar.markdown(
-        "**Pipeline Agentique de Diagnostic & Criticité**\n\n"
-        "Analyse causale automatique et segmentation financière (fréquence × coûts)."
-    )
-    st.sidebar.divider()
-
-    # Métriques rapides dans la barre latérale
-    total_cost = summary_df["total_cost_eur"].sum()
-    total_incidents = len(incidents_df)
-    total_clusters = len(summary_df)
-    crit_clusters = (summary_df["criticality_tier"] == "Critique").sum()
-
-    st.sidebar.metric("Incidents analysés", f"{total_incidents:,}".replace(",", " "))
-    st.sidebar.metric("Clusters identifiés", f"{total_clusters}")
-    st.sidebar.metric("Impact financier total", format_currency(total_cost))
-    st.sidebar.metric("Clusters Critiques", f"{crit_clusters} (Pareto)")
-
-    st.sidebar.divider()
-    st.sidebar.info(
-        "💡 **Sources des données** :\n"
-        "- `clusters_merged.csv` (plan d'action par cluster fusionné)\n"
-        "- `incidents_segmented.csv` (1800 incidents enrichis)"
-    )
-
-    # En-tête principal
-    st.title("Tableau de Bord de Diagnostic des Incidents")
-    st.markdown(
-        "Visualisation de la segmentation non supervisée couplée au diagnostic causal "
-        "d'agents IA et à l'évaluation de criticité opérationnelle."
-    )
-
-    # Onglets principaux
-    tab0, tab1, tab2, tab3, tab4 = st.tabs([
-        "🎯 Plan d'action",
-        "📊 Synthèse Exécutive & Pareto",
-        "🔍 Diagnostic Détaillé par Cluster",
-        "📋 Explorateur d'Incidents",
-        "🔬 Chronologie & Efficacité Équipements",
-    ])
-
-    # =========================================================================
-    # ONGLET 0 : PLAN D'ACTION
-    # =========================================================================
-    with tab0:
-        st.subheader("Plan d'action par voie de remédiation")
-        ap_data = load_action_plan_data()
-        cards = summary_df[summary_df["merged_cluster_id"] != ISOLATED_ID].sort_values("criticality_rank")
-        iso = summary_df[summary_df["merged_cluster_id"] == ISOLATED_ID]
-        if len(iso):
-            st.caption(f"{int(iso['frequency'].sum())} incidents isolés / atypiques non regroupés (sans carte).")
-
-        a1, a2, a3 = st.columns([1, 1, 2])
-        with a1:
-            part_f = st.multiselect("Partition (type d'actif) :", sorted(p for p in cards["partition"].unique() if p), key="ap_part")
-        with a2:
-            tier_f = st.multiselect("Criticité :", ["Critique", "Élevée", "Moyenne", "Faible"], key="ap_tier")
-        with a3:
-            q_f = st.text_input("Recherche dans le titre :", "", key="ap_q")
-        if part_f:
-            cards = cards[cards["partition"].isin(part_f)]
-        if tier_f:
-            cards = cards[cards["criticality_tier"].isin(tier_f)]
-        if q_f.strip():
-            cards = cards[cards["problem_title"].str.contains(q_f.strip(), case=False, na=False)]
-
-        st.caption(f"{len(cards)} carte(s) affichée(s).")
-        for _, row in cards.iterrows():
-            header = (f"[{row['criticality_tier']}] {row['problem_title']} — "
-                      f"{int(row['frequency'])} incidents — {format_currency(row['total_cost_eur'])}")
-            with st.expander(header):
-                render_action_card(row, ap_data, incidents_df)
-
-    # =========================================================================
-    # ONGLET 1 : SYNTHÈSE EXÉCUTIVE & PARETO
-    # =========================================================================
-    with tab1:
-        st.subheader("Vue d'ensemble de la flotte et Analyse Pareto")
-
-        # Cartes KPI
-        col1, col2, col3, col4, col5 = st.columns(5)
-        col1.metric("Total Incidents", f"{total_incidents:,}".replace(",", " "))
-        col2.metric("Impact Financier", format_currency(total_cost))
-        col3.metric("Arrêt Cumulé", f"{incidents_df['downtime_hours'].sum():,.0f} h".replace(",", " "))
-        col4.metric("Coût Moyen / Incident", format_currency(incidents_df['estimated_cost_eur'].mean()))
-        col5.metric("Top 20% des Causes", f"{int(total_clusters * 0.2)} clusters")
-
-        st.divider()
-
-        # Graphique 1 : Courbe de Pareto (Coûts cumulés)
-        sorted_clusters = summary_df.sort_values(by="total_cost_eur", ascending=False).copy()
-        sorted_clusters["cum_cost"] = sorted_clusters["total_cost_eur"].cumsum()
-        sorted_clusters["cum_ratio"] = (sorted_clusters["cum_cost"] / total_cost) * 100
-
-        fig_pareto = go.Figure()
-        # Barres de coûts
-        fig_pareto.add_trace(go.Bar(
-            x=sorted_clusters["cluster_id"],
-            y=sorted_clusters["total_cost_eur"],
-            name="Coût total (€)",
-            marker=dict(
-                color=[TIER_COLORS.get(t, "#64748B") for t in sorted_clusters["criticality_tier"]],
-            ),
-            hovertemplate="<b>%{x}</b><br>Coût: %{y:,.0f} €<extra></extra>",
-            yaxis="y1",
-        ))
-        # Ligne de ratio cumulé
-        fig_pareto.add_trace(go.Scatter(
-            x=sorted_clusters["cluster_id"],
-            y=sorted_clusters["cum_ratio"],
-            name="% Coût cumulé",
-            mode="lines+markers",
-            line=dict(color="#2563EB", width=3),
-            hovertemplate="<b>%{x}</b><br>Cumul: %{y:.1f}%<extra></extra>",
-            yaxis="y2",
-        ))
-        # Seuil 80% Pareto
-        fig_pareto.add_shape(
-            type="line",
-            x0=-0.5,
-            x1=len(sorted_clusters) - 0.5,
-            y0=80,
-            y1=80,
-            yref="y2",
-            line=dict(color="#DC2626", dash="dash", width=2),
-        )
-        fig_pareto.update_layout(
-            title="Analyse Pareto des Clusters (Règle 80/20)",
-            xaxis=dict(title="Cluster ID", tickangle=-45),
-            yaxis=dict(title="Coût total d'exploitation (€)"),
-            yaxis2=dict(
-                title="% Cumulé du coût total",
-                overlaying="y",
-                side="right",
-                range=[0, 105],
-                ticksuffix="%",
-            ),
-            legend=dict(x=0.8, y=1.15, orientation="h"),
-            hovermode="x unified",
-            height=460,
-            margin=dict(l=40, r=40, t=60, b=80),
-        )
-        st.plotly_chart(fig_pareto, use_container_width=True)
-
-        st.divider()
-
-        # Graphique 2 & 3 : Matrice 2D Risque & Répartition par Actif
-        col_m1, col_m2 = st.columns([6, 5])
-
-        with col_m1:
-            st.markdown("#### Matrice Risque : Fréquence vs Coût Moyen")
-            fig_matrix = px.scatter(
-                summary_df,
-                x="frequency",
-                y="mean_cost_eur",
-                size="total_downtime_hours",
-                color="criticality_tier",
-                color_discrete_map=TIER_COLORS,
-                hover_name="problem_title",
-                hover_data={
-                    "cluster_id": True,
-                    "frequency": True,
-                    "mean_cost_eur": ":,.0f",
-                    "total_cost_eur": ":,.0f",
-                    "total_downtime_hours": ":,.1f",
-                    "criticality_tier": False,
-                },
-                labels={
-                    "frequency": "Fréquence (nombre d'incidents)",
-                    "mean_cost_eur": "Coût moyen unitaire (€)",
-                    "total_downtime_hours": "Arrêt total (heures)",
-                    "criticality_tier": "Niveau de criticité",
-                },
-                size_max=35,
-            )
-            fig_matrix.update_layout(height=420, margin=dict(l=20, r=20, t=30, b=30))
-            st.plotly_chart(fig_matrix, use_container_width=True)
-
-        with col_m2:
-            st.markdown("#### Répartition Financière par Site et Domaine")
-            site_cost = incidents_df.groupby(["site", "asset_type"])["estimated_cost_eur"].sum().reset_index()
-            site_cost = site_cost.sort_values(by="estimated_cost_eur", ascending=True)
-
-            fig_site = px.bar(
-                site_cost,
-                y="site",
-                x="estimated_cost_eur",
-                color="asset_type",
-                orientation="h",
-                color_discrete_map={"wind": "#0EA5E9", "solar": "#F59E0B"},
-                labels={
-                    "estimated_cost_eur": "Coût total d'exploitation (€)",
-                    "site": "Site d'exploitation",
-                    "asset_type": "Actif",
-                },
-            )
-            fig_site.update_layout(height=420, margin=dict(l=20, r=20, t=30, b=30))
-            st.plotly_chart(fig_site, use_container_width=True)
-
-        st.divider()
-
-        # Tableau des 37 clusters
-        st.markdown("#### Liste Complète des Clusters de Défaillances")
-        tier_filter = st.multiselect(
-            "Filtrer par niveau de criticité :",
-            options=["Critique", "Élevée", "Moyenne", "Faible"],
-            default=["Critique", "Élevée"],
-        )
-        filtered_summary = summary_df[summary_df["criticality_tier"].isin(tier_filter)] if tier_filter else summary_df
-
-        display_cols = [
-            "criticality_rank",
-            "criticality_tier",
-            "cluster_id",
-            "problem_title",
-            "frequency",
-            "total_cost_eur",
-            "mean_cost_eur",
-            "total_downtime_hours",
-            "common_cause",
-        ]
-        st.dataframe(
-            filtered_summary[display_cols].style.format({
-                "total_cost_eur": lambda x: f"{x:,.0f} €",
-                "mean_cost_eur": lambda x: f"{x:,.0f} €",
-                "total_downtime_hours": lambda x: f"{x:.1f} h",
-            }),
-            use_container_width=True,
-            height=350,
-        )
-
-    # =========================================================================
-    # ONGLET 2 : DIAGNOSTIC DÉTAILLÉ PAR CLUSTER
-    # =========================================================================
-    with tab2:
-        st.subheader("Fiche Diagnostic & Cause Racine par Cluster")
-
-        cluster_options = summary_df["cluster_id"].tolist()
-        cluster_labels = {
-            c: f"[Rang {summary_df.loc[summary_df['cluster_id'] == c, 'criticality_rank'].values[0]}] {c} - {summary_df.loc[summary_df['cluster_id'] == c, 'problem_title'].values[0]}"
-            for c in cluster_options
-        }
-
-        selected_cluster = st.selectbox(
-            "Sélectionnez un cluster à examiner :",
-            options=cluster_options,
-            format_func=lambda x: cluster_labels.get(x, x),
-        )
-
-        cluster_data = summary_df[summary_df["cluster_id"] == selected_cluster].iloc[0]
-        cluster_incidents = incidents_df[incidents_df["cluster_id"] == selected_cluster]
-
-        # En-tête du cluster sélectionné
-        badge_color = TIER_COLORS.get(cluster_data["criticality_tier"], "#64748B")
-        st.markdown(
-            f"""
-            <div style="padding: 18px; border-radius: 8px; border-left: 6px solid {badge_color}; background-color: #F8FAFC; margin-bottom: 20px;">
-                <h3 style="margin-top: 0; color: #0F172A;">{cluster_data['problem_title']}</h3>
-                <span style="background-color: {badge_color}; color: white; padding: 4px 10px; border-radius: 4px; font-weight: 600; font-size: 0.85rem;">
-                    NIVEAU : {cluster_data['criticality_tier'].upper()} (Rang {cluster_data['criticality_rank']})
-                </span>
-                <span style="margin-left: 10px; font-size: 0.9rem; color: #475569;">
-                    Identifiant technique : <code>{cluster_data['cluster_id']}</code>
-                </span>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-        # Chiffres clés du cluster
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Nombre d'incidents", f"{cluster_data['frequency']}")
-        c2.metric("Coût d'exploitation total", format_currency(cluster_data['total_cost_eur']))
-        c3.metric("Coût unitaire moyen", format_currency(cluster_data['mean_cost_eur']))
-        c4.metric("Arrêt total cumulé", f"{cluster_data['total_downtime_hours']:.1f} h")
-
-        st.markdown("---")
-
-        # Diagnostic causal IA
-        d_col1, d_col2 = st.columns(2)
-        with d_col1:
-            st.markdown("#### 🔬 Analyse Causale (Agent IA)")
-            st.info(f"**Cause racine commune identifiée :**\n\n{cluster_data['common_cause']}")
-            st.markdown(f"**Description du phénomène :**\n\n{cluster_data['problem_description']}")
-
-        with d_col2:
-            st.markdown("#### 🛡️ Impact Système & Recommandations")
-            st.warning(f"**Impact opérationnel sur l'installation :**\n\n{cluster_data['system_impact']}")
-            recos = [r for r in parse_json_list(cluster_data["recommendations"]) if isinstance(r, dict)]
-            reco_md = "\n".join(
-                f"- **{SCOPE_BADGES.get(r.get('scope'), r.get('scope', ''))}** {r.get('action', '')}"
-                + (f" ({', '.join(map(str, r['targets']))})" if isinstance(r.get("targets"), list) and r["targets"] else "")
-                for r in recos
-            ) or "Aucune recommandation."
-            st.success(f"**Actions correctives / préventives préconisées :**\n\n{reco_md}")
-
-        st.divider()
-
-        # Liste des incidents de ce cluster
-        st.markdown(f"#### Incidents rattachés à ce cluster ({len(cluster_incidents)})")
-
-        source_counts = cluster_incidents["assignment_source"].value_counts().to_dict()
-        st.caption(
-            "Origine des affectations : "
-            + (" · ".join(f"**{n}** {src}" for src, n in source_counts.items()) or "n/a")
-        )
-
-        show_incidents_cols = [
-            "incident_id",
-            "site",
-            "equipment_id",
-            "date",
-            "severity",
-            "estimated_cost_eur",
-            "downtime_hours",
-            "weather_condition",
-            "assignment_source",
-        ]
-        show_incidents_cols = [c for c in show_incidents_cols if c in cluster_incidents.columns]
-
-        st.dataframe(
-            cluster_incidents[show_incidents_cols].style.format({
-                "estimated_cost_eur": lambda x: f"{x:,.0f} €",
-                "downtime_hours": lambda x: f"{x:.1f} h",
-            }),
-            use_container_width=True,
-            height=250,
-        )
-
-        # Inspection approfondie d'un incident
-        st.markdown("##### 🔍 Rapport d'intervention individuel")
-        inc_ids = cluster_incidents["incident_id"].tolist()
-        if inc_ids:
-            selected_inc_id = st.selectbox(
-                "Choisir un incident à lire en détail :",
-                options=inc_ids,
-                format_func=lambda x: f"Incident #{x} ({cluster_incidents.loc[cluster_incidents['incident_id'] == x, 'site'].values[0]})",
-            )
-            selected_inc = cluster_incidents[cluster_incidents["incident_id"] == selected_inc_id].iloc[0]
-            with st.expander("Consulter le texte complet du rapport d'intervention", expanded=True):
-                st.write(selected_inc["text"])
-                st.caption(
-                    f"Date : {selected_inc.get('date', 'N/A')} | "
-                    f"Technicien : {selected_inc.get('technician_id', 'N/A')} | "
-                    f"Format source : {selected_inc.get('document_format', 'N/A')}"
-                )
-
-    # =========================================================================
-    # ONGLET 3 : EXPLORATEUR D'INCIDENTS
-    # =========================================================================
-    with tab3:
-        st.subheader("Explorateur & Recherche Avancée d'Incidents")
-
-        # Filtres horizontaux
-        f_col1, f_col2, f_col3, f_col4 = st.columns(4)
-        with f_col1:
-            search_query = st.text_input("🔎 Recherche plein texte dans les rapports :", "")
-        with f_col2:
-            asset_filter = st.multiselect(
-                "Type d'actif :",
-                options=sorted(incidents_df["asset_type"].dropna().unique()),
-                default=sorted(incidents_df["asset_type"].dropna().unique()),
-            )
-        with f_col3:
-            site_filter = st.multiselect(
-                "Site :",
-                options=sorted(incidents_df["site"].dropna().unique()),
-            )
-        with f_col4:
-            crit_filter = st.multiselect(
-                "Criticité du cluster :",
-                options=["Critique", "Élevée", "Moyenne", "Faible"],
-                default=["Critique", "Élevée", "Moyenne", "Faible"],
-            )
-
-        # Application des filtres
-        filtered_df = incidents_df.copy()
-        if search_query.strip():
-            filtered_df = filtered_df[
-                filtered_df["text"].str.contains(search_query.strip(), case=False, na=False)
-            ]
-        if asset_filter:
-            filtered_df = filtered_df[filtered_df["asset_type"].isin(asset_filter)]
-        if site_filter:
-            filtered_df = filtered_df[filtered_df["site"].isin(site_filter)]
-        if crit_filter:
-            filtered_df = filtered_df[filtered_df["cluster_criticality_tier"].isin(crit_filter)]
-
-        # Métriques sur la sélection
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Résultats filtrés", f"{len(filtered_df)} / {len(incidents_df)}")
-        m2.metric("Impact financier filtré", format_currency(filtered_df["estimated_cost_eur"].sum()))
-        m3.metric("Arrêt cumulé filtré", f"{filtered_df['downtime_hours'].sum():,.0f} h".replace(",", " "))
-        m4.metric("Clusters touchés", f"{filtered_df['cluster_id'].nunique()}")
-
-        # Bouton d'export CSV
-        csv_export = filtered_df.to_csv(index=False).encode("utf-8")
-        st.download_button(
-            label="📥 Télécharger la sélection filtrée (CSV)",
-            data=csv_export,
-            file_name="incidents_selection_filtree.csv",
-            mime="text/csv",
-        )
-
-        st.dataframe(
-            filtered_df[[
-                "incident_id",
-                "cluster_id",
-                "problem_title",
-                "cluster_criticality_tier",
-                "site",
-                "equipment_id",
-                "date",
-                "severity",
-                "estimated_cost_eur",
-                "downtime_hours",
-                "weather_condition",
-                "assignment_source",
-            ]].style.format({
-                "estimated_cost_eur": lambda x: f"{x:,.0f} €",
-                "downtime_hours": lambda x: f"{x:.1f} h",
-            }),
-            use_container_width=True,
-            height=400,
-        )
-
-    # =========================================================================
-    # ONGLET 4 : CHRONOLOGIE ÉQUIPEMENTS & EFFICACITÉ TECHNICIENS
-    # =========================================================================
-    with tab4:
-        st.subheader("🔬 Chronologie des Pannes & Évaluation des Interventions")
-        st.markdown(
-            "Recentrage de l'analyse sur le cycle de vie des **actifs (`equipment_id`)** et "
-            "l'efficacité opérationnelle des **techniciens**. "
-            "Reconstitution des frises chronologiques, détection des récidives précoces et palmarès des *bad actors*."
-        )
-
-        eq_df, tl_df, tech_df = load_equipment_data()
-
-        # Barre de filtres et seuil de récidive
-        fc1, fc2, fc3 = st.columns([1, 1, 2])
-        with fc1:
-            eq_site_filter = st.selectbox(
-                "Filtrer par site :",
-                options=["Tous"] + sorted(eq_df["site"].dropna().unique().tolist()),
-            )
-        with fc2:
-            eq_asset_filter = st.selectbox(
-                "Filtrer par type d'actif :",
-                options=["Tous"] + sorted(eq_df["asset_type"].dropna().unique().tolist()),
-            )
-        with fc3:
-            rec_threshold = st.slider(
-                "⏱️ Seuil temporel de récidive (jours après intervention) :",
-                min_value=3,
-                max_value=60,
-                value=30,
-                step=1,
-                help="Un incident survenant moins de N jours après le précédent sur la même machine est classé comme récidive post-intervention.",
-            )
-
-        # Filtrage des DataFrames
-        filtered_eq = eq_df.copy()
-        if eq_site_filter != "Tous":
-            filtered_eq = filtered_eq[filtered_eq["site"] == eq_site_filter]
-        if eq_asset_filter != "Tous":
-            filtered_eq = filtered_eq[filtered_eq["asset_type"] == eq_asset_filter]
-
-        # Calcul dynamique du flag de récidive selon le curseur
-        tl_work = tl_df.copy()
-        tl_work["datetime"] = pd.to_datetime(tl_work["date"])
-        tl_work["is_custom_rec"] = (
-            tl_work["days_since_last_incident"].notna()
-            & (tl_work["days_since_last_incident"] <= rec_threshold)
-        )
-        tl_work["followed_by_custom_rec"] = (
-            tl_work["days_until_next_incident"].notna()
-            & (tl_work["days_until_next_incident"] <= rec_threshold)
-        )
-
-        # KPIs globaux flotte
-        st.divider()
-        g1, g2, g3, g4 = st.columns(4)
-        eq_ids_filtered = set(filtered_eq["equipment_id"])
-        fleet_tl = tl_work[tl_work["equipment_id"].isin(eq_ids_filtered)]
-        fleet_total_inc = len(fleet_tl)
-        fleet_rec_cnt = int(fleet_tl["is_custom_rec"].sum())
-        fleet_rec_rate = (fleet_rec_cnt / max(1, fleet_total_inc)) * 100
-        fleet_mtbf = filtered_eq["mtbf_days"].mean() if not filtered_eq.empty else 0
-
-        g1.metric("Équipements filtrés", f"{len(filtered_eq)} machines")
-        g2.metric("MTBF Moyen Flotte", f"{fleet_mtbf:.1f} jours")
-        g3.metric(f"Récidives (< {rec_threshold}j)", f"{fleet_rec_cnt} incidents")
-        g4.metric(f"Taux de récidive global", f"{fleet_rec_rate:.1f} %")
-
-        # Section 1 : Chronologie détaillée par équipement
-        st.subheader("📅 Chronique de vie & Timeline par Équipement")
-
-        selected_eq = st.selectbox(
-            "Sélectionner un équipement pour visualiser sa timeline :",
-            options=filtered_eq["equipment_id"].tolist(),
-            format_func=lambda x: f"{x} ({filtered_eq.loc[filtered_eq['equipment_id'] == x, 'site'].values[0]} - {filtered_eq.loc[filtered_eq['equipment_id'] == x, 'total_incidents'].values[0]} pannes)",
-        )
-
-        if selected_eq:
-            eq_info = filtered_eq[filtered_eq["equipment_id"] == selected_eq].iloc[0]
-            eq_timeline = tl_work[tl_work["equipment_id"] == selected_eq].sort_values("datetime").copy()
-
-            # Cartes métriques pour cet équipement
-            c1, c2, c3, c4, c5 = st.columns(5)
-            eq_rec_count = int(eq_timeline["is_custom_rec"].sum())
-            eq_rec_rate = (eq_rec_count / max(1, len(eq_timeline) - 1)) * 100
-            c1.metric("Total Pannes", f"{eq_info['total_incidents']}")
-            c2.metric("MTBF (délai moyen)", f"{eq_info['mtbf_days']:.1f} j")
-            c3.metric(f"Récidives (< {rec_threshold}j)", f"{eq_rec_count} ({eq_rec_rate:.0f} %)")
-            c4.metric("Coût Cumulé", format_currency(eq_info["total_cost_eur"]))
-            c5.metric("Technicien Fréquent", f"{eq_info['most_frequent_technician']}")
-
-            # Graphique interactif de la frise chronologique
-            eq_timeline["statut_panne"] = eq_timeline["is_custom_rec"].map(
-                {True: f"⚠️ Récidive (< {rec_threshold}j)", False: "Panne isolée / 1ère panne"}
-            )
-            eq_timeline["date_str"] = eq_timeline["datetime"].dt.strftime("%Y-%m-%d")
-
-            hover_cols = {
-                "datetime": False,
-                "date_str": True,
-                "incident_order": True,
-                "severity": True,
-                "technician_id": True,
-                "prev_technician_id": True,
-                "days_since_last_incident": ":.1f",
-                "downtime_hours": ":.1f",
-                "estimated_cost_eur": ":.0f",
-            }
-            if "problem_title" in eq_timeline.columns:
-                hover_cols["problem_title"] = True
-
-            fig_timeline = px.scatter(
-                eq_timeline,
-                x="datetime",
-                y="days_since_last_incident",
-                color="statut_panne",
-                size="downtime_hours",
-                color_discrete_map={
-                    f"⚠️ Récidive (< {rec_threshold}j)": "#EF4444",
-                    "Panne isolée / 1ère panne": "#3B82F6",
-                },
-                hover_data=hover_cols,
-                labels={
-                    "datetime": "Date de l'incident",
-                    "days_since_last_incident": "Jours depuis la panne précédente",
-                    "statut_panne": "Statut de récidive",
-                    "downtime_hours": "Arrêt (h)",
-                    "date_str": "Date",
-                    "technician_id": "Technicien",
-                    "prev_technician_id": "Tech précédent",
-                },
-                title=f"Frise Chronologique des Pannes : {selected_eq} (Taille de bulle = Durée d'arrêt)",
-            )
-            fig_timeline.add_hline(
-                y=rec_threshold,
-                line_dash="dash",
-                line_color="#EF4444",
-                annotation_text=f"Seuil de récidive ({rec_threshold}j)",
-                annotation_position="bottom right",
-            )
-            fig_timeline.update_layout(height=420)
-            st.plotly_chart(fig_timeline, use_container_width=True)
-
-            # Historique tabulaire
-            with st.expander(f"📋 Détail de l'historique des {len(eq_timeline)} pannes de {selected_eq}"):
-                display_cols = [
-                    "incident_order",
-                    "date",
-                    "severity",
-                    "days_since_last_incident",
-                    "is_custom_rec",
-                    "technician_id",
-                    "prev_technician_id",
-                    "downtime_hours",
-                    "estimated_cost_eur",
-                    "problem_title",
-                ]
-                avail_cols = [c for c in display_cols if c in eq_timeline.columns]
-                st.dataframe(
-                    eq_timeline[avail_cols].style.format({
-                        "days_since_last_incident": lambda x: f"{x:.1f} j" if pd.notna(x) else "-",
-                        "downtime_hours": lambda x: f"{x:.1f} h",
-                        "estimated_cost_eur": lambda x: f"{x:,.0f} €",
-                    }),
-                    use_container_width=True,
-                    height=250,
-                )
-
-        st.divider()
-
-        # Section 2 : Palmarès des Bad Actors
-        st.subheader("⚠️ Palmarès des « Bad Actors » (Équipements les plus fragiles)")
-        st.markdown(
-            "Les équipements combinant **faible MTBF**, **taux élevé de récidive** et **coûts cumulés élevés** "
-            "doivent faire l'objet d'une révision majeure ou d'un remplacement préventif."
-        )
-
-        col_ba1, col_ba2 = st.columns([3, 2])
-        with col_ba1:
-            fig_scatter = px.scatter(
-                filtered_eq,
-                x="mtbf_days",
-                y="total_cost_eur",
-                size="total_incidents",
-                color="bad_actor_score",
-                color_continuous_scale="Reds",
-                hover_name="equipment_id",
-                hover_data=["site", "total_incidents", "recurrence_rate_30d", "bad_actor_score"],
-                labels={
-                    "mtbf_days": "MTBF moyen (Jours de bon fonctionnement)",
-                    "total_cost_eur": "Coût cumulé total (€)",
-                    "bad_actor_score": "Score Bad Actor (0-100)",
-                    "total_incidents": "Nombre d'incidents",
-                },
-                title="Vulnérabilité : MTBF vs Coût Cumulé (Coloré par Score de Criticité)",
-            )
-            fig_scatter.update_layout(height=400)
-            st.plotly_chart(fig_scatter, use_container_width=True)
-
-        with col_ba2:
-            st.markdown("**Top 10 Actifs Critiques à Auditer :**")
-            top_bad = filtered_eq.head(10)[[
-                "equipment_id",
-                "site",
-                "total_incidents",
-                *(["severe_incidents"] if "severe_incidents" in filtered_eq.columns else []),
-                "mtbf_days",
-                "recurrence_rate_30d",
-                "total_cost_eur",
-                "bad_actor_score",
-            ]]
-            st.dataframe(
-                top_bad.style.format({
-                    "mtbf_days": "{:.1f} j",
-                    "recurrence_rate_30d": "{:.1f} %",
-                    "total_cost_eur": lambda x: f"{x:,.0f} €",
-                    "bad_actor_score": "{:.1f}",
-                }),
-                use_container_width=True,
-                height=350,
-            )
-
-        st.divider()
-
-        # Section 3 : Audit & Efficacité des Techniciens
-        st.subheader("👷 Audit d'Efficacité des Interventions par Technicien")
-        st.markdown(
-            "Mesure la pérennité des réparations : quel est le **taux de récidive** post-intervention "
-            "et le **temps moyen de survie de la machine** avant sa prochaine panne ?"
-        )
-
-        # Calcul dynamique des métriques techniciens avec le seuil personnalisé
-        custom_tech_stats = []
-        for tech_id, t_group in tl_work.groupby("technician_id"):
-            tot = len(t_group)
-            opps = t_group["days_until_next_incident"].dropna()
-            recs = t_group["followed_by_custom_rec"].sum()
-            surv = opps.mean() if len(opps) > 0 else float("nan")
-            rate = (recs / len(opps) * 100) if len(opps) > 0 else 0.0
-            custom_tech_stats.append({
-                "technician_id": tech_id,
-                "total_interventions": tot,
-                f"recidives_{rec_threshold}j": int(recs),
-                f"taux_recidive_{rec_threshold}j": round(rate, 1),
-                "delai_survie_moyen_jours": round(surv, 1) if pd.notna(surv) else "-",
-                "duree_arret_moyenne": round(t_group["downtime_hours"].mean(), 1),
-                "cout_moyen": round(t_group["estimated_cost_eur"].mean(), 0),
-            })
-        custom_tech_df = pd.DataFrame(custom_tech_stats).sort_values(
-            by=f"taux_recidive_{rec_threshold}j", ascending=False
-        )
-
-        t_col1, t_col2 = st.columns([3, 2])
-        with t_col1:
-            fig_tech = px.bar(
-                custom_tech_df,
-                x=f"taux_recidive_{rec_threshold}j",
-                y="technician_id",
-                orientation="h",
-                color=f"taux_recidive_{rec_threshold}j",
-                color_continuous_scale="RdYlGn_r",
-                labels={
-                    f"taux_recidive_{rec_threshold}j": f"Taux de panne sous {rec_threshold}j (%)",
-                    "technician_id": "Technicien",
-                },
-                title=f"Taux de Récidive Post-Intervention sous {rec_threshold} jours par Technicien",
-            )
-            fig_tech.update_layout(yaxis={"categoryorder": "total ascending"}, height=420)
-            st.plotly_chart(fig_tech, use_container_width=True)
-
-        with t_col2:
-            st.markdown(f"**Classement Qualité & Rappels (< {rec_threshold}j) :**")
-            st.dataframe(
-                custom_tech_df.style.format({
-                    f"taux_recidive_{rec_threshold}j": "{:.1f} %",
-                    "duree_arret_moyenne": "{:.1f} h",
-                    "cout_moyen": lambda x: f"{x:,.0f} €",
-                }),
-                use_container_width=True,
-                height=380,
-            )
+    data = load_action_plan_data()
+    cards = build_cards(summary_df, incidents_df, data)
+    n_isolated = int(summary_df.loc[summary_df["merged_cluster_id"] == ISOLATED_ID, "frequency"].sum())
+
+    with st.sidebar:
+        st.markdown("**Données**")
+        st.caption(f"Segmentation : `{SEG_DIR}`  \nÉquipements : `{EQUIPMENT_SUMMARY_PATH.parent}`")
+        st.caption(f"Pour régénérer : `{RUN_CMD}`")
+        if st.button("Recharger les données"):
+            st.cache_data.clear()
+            st.rerun()
+
+    total_cost = incidents_df["estimated_cost_eur"].sum()
+    crit_cost = sum(c["cost"] for c in cards if c["tier"] == "Critique")
+    dates = incidents_df["date"].dropna()
+    period = f"{month(dates.min())} – {month(dates.max())} · " if len(dates) else ""
+    st.html(f"""
+<header class="rp rp-header">
+  <span class="eyebrow">{period}{incidents_df['site'].nunique()} sites · {incidents_df['equipment_id'].nunique()} équipements</span>
+  <h1>Plan d'action fiabilité</h1>
+  <p class="lede">Les incidents des centrales PV et des parcs éoliens regroupés par voie de remédiation : une fiche par
+  correction à mener, classée par coût cumulé, avec les sites et équipements où agir en priorité.</p>
+  {figures([(num(len(incidents_df)), "incidents analysés"), (keur(total_cost), "coût total estimé"),
+            (num(len(cards)), "voies de remédiation"),
+            (f"{num(100 * crit_cost / total_cost) if total_cost else 0} %", "du coût dans les fiches critiques")])}
+</header>""")
+
+    t_plan, t_overview, t_incidents, t_equipment, t_method = st.tabs(
+        ["Plan d'action", "Vue d'ensemble", "Incidents", "Équipements", "Méthode"])
+    with t_plan:
+        tab_plan(cards, n_isolated)
+    with t_overview:
+        tab_overview(summary_df, incidents_df)
+    with t_incidents:
+        tab_incidents(summary_df, incidents_df)
+    with t_equipment:
+        tab_equipment()
+    with t_method:
+        tab_method(data, len(data["fine"]), n_isolated)
+
+    st.html("<p class='rp footer'>Généré à partir des sorties de la pipeline <code>agentic_pipeline</code> "
+            "(clustering v2) et <code>equipment_analysis</code>.</p>")
 
 
 if __name__ == "__main__":
     main()
-
