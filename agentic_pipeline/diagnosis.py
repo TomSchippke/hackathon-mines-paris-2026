@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import difflib
 import json
+import re
+import unicodedata
 from typing import Any, Callable
 
 import pandas as pd
 
 from .concentration import TO_VERIFY
-from .config import NOMINAL_MIN_MILD_SHARE
-from .extraction import quote_found
+from .config import NOMINAL_MIN_MILD_SHARE, QUOTE_MIN_MATCH
 from .llm_client import call_llm_json
 
 MAX_TEXTS_PER_FINE = 2
@@ -21,7 +23,7 @@ VALID_SCOPES = ("fleet", "site", "equipment")
 SYSTEM_DIAGNOSIS_PROMPT_V2 = """Tu es un expert en fiabilité industrielle (maintenance, retour d'expérience).
 Le cluster analysé représente UNE voie de remédiation : un ensemble de défaillances qu'une même action corrective permet d'éviter.
 
-Ta mission : produire le diagnostic final de ce cluster à partir des données fournies (clusters fins membres avec les causes extraites des rapports, leurs citations et leurs conséquences, remédiation partagée, concentrations statistiquement significatives, règles précurseurs, impact).
+Ta mission : produire le diagnostic final de ce cluster à partir des données fournies (clusters fins membres avec des exemples de rapports, remédiation partagée, concentrations statistiquement significatives, règles précurseurs, impact).
 
 Règles strictes :
 - Énumère chaque défaillance évitée (prevented_outcomes), une phrase courte par résultat.
@@ -29,7 +31,7 @@ Règles strictes :
 - Les recommandations doivent être spécifiques et actionnables. Utilise scope "equipment" ou "site" UNIQUEMENT pour des cibles listées dans la section « Concentrations » ; sinon scope "fleet" avec targets vide.
 - Les règles d'alerte précoce (early_warning_rules) ne peuvent utiliser QUE des rule_id fournis dans la section « Règles précurseurs ».
 - S'il n'y a aucune concentration ou aucun précurseur, dis-le explicitement (liste vide) au lieu d'inventer.
-- La cause commune doit être celle que disent les rapports : justifie-la par 1 à 3 citations RECOPIÉES MOT POUR MOT parmi les citations fournies. Elles seront vérifiées dans les rapports ; sans citation vérifiée, ta cause commune est remplacée par la cause extraite la plus représentative.
+- La cause commune doit être celle que disent les rapports : justifie-la par 1 à 3 citations RECOPIÉES MOT POUR MOT dans les exemples de rapports fournis. Elles seront vérifiées dans les rapports du cluster ; une cause commune sans citation vérifiée est signalée comme non justifiée.
 
 Format de réponse : un objet JSON STRICT avec les clés :
 - "problem_title": titre court (string)
@@ -43,13 +45,14 @@ Format de réponse : un objet JSON STRICT avec les clés :
 
 
 # Fonctionnement nominal : deux questions séparées, plus fiables qu'un jugement global
-SYSTEM_NOMINAL_PROMPT = """Tu es ingénieur fiabilité. On te donne des incidents d'un même groupe : pour chacun, \
-la cause et la conséquence extraites du rapport. Réponds en JSON :
-- "defect_found" : true si, dans la plupart de ces incidents, un défaut ou une dégradation a été constaté \
-sur l'équipement, même mineur ou découvert lors d'un contrôle ; false sinon.
-- "protection_only" : true si, dans la plupart de ces incidents, la seule conséquence est l'arrêt ou le \
-déclenchement prévu d'une protection ou d'une mise en sécurité, en réaction à une condition extérieure \
-identifiée, suivi d'une reprise normale ; false sinon (déclenchement sans cause extérieure, dégât, panne).
+SYSTEM_NOMINAL_PROMPT = """Tu es ingénieur fiabilité. On te donne des extraits de rapports d'incidents d'un \
+même groupe. Réponds en JSON :
+- "defect_found" : true si, dans la plupart de ces incidents, un défaut, une dégradation ou une anomalie \
+a été constaté sur l'équipement, même mineur, sans dommage visible ou découvert lors d'un contrôle ; false sinon.
+- "protection_only" : true si, dans la plupart de ces incidents, un dispositif de protection ou de mise en \
+sécurité s'est déclenché (arrêt, coupure) en réaction à une condition extérieure identifiée, et que ce \
+déclenchement est la seule conséquence avant une reprise normale ; false sinon (simple alerte ou \
+surveillance, déclenchement sans cause extérieure, dégât, panne).
 - "reason" : une phrase qui justifie tes deux réponses."""
 
 
@@ -92,16 +95,11 @@ def build_diagnosis_context(
     for fid in member_fine_ids:
         card = fine_cards.get(fid, {}) or {}
         title = fine_titles.get(fid, {}) or {}
-        texts, quotes, consequences = [], [], []
-        reps = card.get("representative_texts") or []
-        for k, t in enumerate(reps[:MAX_TEXTS_PER_FINE]):
+        texts = []
+        for t in (card.get("representative_texts") or [])[:MAX_TEXTS_PER_FINE]:
             if texts_total >= MAX_TEXTS_TOTAL:
                 break
             texts.append(str(t).strip()[:MAX_TEXT_CHARS])
-            for src, dst in ((card.get("representative_quotes"), quotes),
-                             (card.get("representative_consequences"), consequences)):
-                if src and k < len(src) and str(src[k]).strip():
-                    dst.append(str(src[k]).strip()[:MAX_TEXT_CHARS])
             texts_total += 1
         fines.append({
             "fine_cluster_id": fid,
@@ -110,8 +108,6 @@ def build_diagnosis_context(
             "size": card.get("size"),
             "keywords": list(card.get("keywords") or [])[:10],
             "representative_texts": texts,
-            "representative_quotes": quotes,
-            "representative_consequences": consequences,
         })
 
     conc_rows: list[dict] = []
@@ -178,11 +174,7 @@ def _build_user_prompt(ctx: dict) -> str:
         lines.append(f"- {f['fine_cluster_id']} | {f['fine_title']} | mode de défaillance : "
                      f"{f['failure_mode']} | taille : {f['size']} | mots-clés : {', '.join(f['keywords'])}")
         for t in f["representative_texts"]:
-            lines.append(f"    * Cause : {t}")
-        for q in f.get("representative_quotes", []):
-            lines.append(f"    * Citation : « {q} »")
-        for c in f.get("representative_consequences", []):
-            lines.append(f"    * Conséquence : {c}")
+            lines.append(f"    * Exemple : {t}")
     lines += ["", "## Impact", json.dumps(ctx.get("impact", {}), ensure_ascii=False, default=str)]
     if ctx.get("mild_share") is not None:
         lines.append(f"Part des incidents au niveau de sévérité le plus bas : {ctx['mild_share']:.0%}")
@@ -235,38 +227,37 @@ def _defaults(ctx: dict) -> dict:
     }
 
 
-def _extracted_cause(ctx: dict) -> tuple[str, list[str]]:
-    """Cause extraite la plus représentative du plus gros cluster fin membre, avec sa citation."""
-    fines = sorted(ctx.get("fine_clusters", []), key=lambda f: -(f.get("size") or 0))
-    for f in fines:
-        if f.get("representative_texts"):
-            return f["representative_texts"][0], list(f.get("representative_quotes") or [])[:1]
-    return "", []
+def simplify(text: Any) -> str:
+    """Minuscules, sans accents ni ponctuation : tolère les petites variations de recopie."""
+    text = unicodedata.normalize("NFKD", str(text or "").lower()).encode("ascii", "ignore").decode()
+    return re.sub(r"[^a-z0-9]+", " ", text).strip()
+
+
+def quote_found(quote: Any, text: Any) -> bool:
+    """L'extrait cité figure-t-il dans le texte (à QUOTE_MIN_MATCH près) ? Trois mots au moins."""
+    q, t = simplify(quote), simplify(text)
+    if len(q.split()) < 3 or not t:
+        return False
+    if q in t:
+        return True
+    m = difflib.SequenceMatcher(None, q, t, autojunk=False).find_longest_match(0, len(q), 0, len(t))
+    return m.size >= QUOTE_MIN_MATCH * len(q)
 
 
 def _check_cause(result: dict, ctx: dict, out: dict) -> None:
-    """Cause commune gardée si une citation au moins figure dans un rapport du cluster ; sinon
-    remplacée par la cause extraite (citation déjà vérifiée à l'extraction)."""
+    """Citations gardées si elles figurent dans un rapport du cluster ; sans citation vérifiée, la
+    cause commune est marquée non justifiée (`common_cause_source` = « non_citee »)."""
     raw = result.get("common_cause_quotes")
     raw = raw if isinstance(raw, list) else []
     texts = ctx.get("member_texts") or []
     quotes = [q.strip()[:500] for q in raw if isinstance(q, str) and q.strip()]
     quotes = [q for q in quotes if any(quote_found(q, t) for t in texts)][:MAX_CAUSE_QUOTES]
-    if quotes:
-        out.update(common_cause_quotes=quotes, common_cause_source="diagnostic")
-        return
-    cause, cause_quotes = _extracted_cause(ctx)
-    if cause:
-        out.update(common_cause=cause, common_cause_quotes=cause_quotes, common_cause_source="extraction")
+    out.update(common_cause_quotes=quotes, common_cause_source="citee" if quotes else "non_citee")
 
 
 def _nominal_prompt(ctx: dict) -> str:
-    lines = []
-    for f in ctx.get("fine_clusters", []):
-        consequences = f.get("representative_consequences") or []
-        for k, cause in enumerate(f.get("representative_texts") or []):
-            lines.append(f"- Cause : {cause}" + (f" | Conséquence : {consequences[k]}" if k < len(consequences) else ""))
-    return "Incidents du groupe :\n" + "\n".join(lines)
+    texts = [t for f in ctx.get("fine_clusters", []) for t in f.get("representative_texts") or []]
+    return "Rapports du groupe :\n" + "\n".join(f"- {t}" for t in texts)
 
 
 def _check_nominal(ctx: dict, out: dict, llm: Callable) -> None:

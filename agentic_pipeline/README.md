@@ -8,45 +8,36 @@ cherche, pour chacune, les lieux où agir et les signaux précurseurs.
 Un cluster fusionné = **une voie de remédiation distincte** : une action concrète qui prévient
 un ensemble de modes de défaillance. Deux niveaux coexistent :
 
-- **cluster fin** (`fine_cluster_id`) : une cause, issue de HDBSCAN sur les causes extraites ;
+- **cluster fin** (`fine_cluster_id`) : un mode de défaillance, issu de HDBSCAN ;
 - **cluster fusionné** (`merged_cluster_id`) : une remédiation, issue de l'agent de fusion.
 
 Les sites, équipements et périodes ne servent **qu'après** le clustering (profil de concentration).
-Le clustering repose uniquement sur les embeddings de la **cause extraite** de chaque rapport, pas du
-rapport entier : un rapport décrit aussi les dégâts, et regroupé tel quel il sépare une même cause en
-plusieurs clusters selon sa gravité (sur les données réelles, 85 % des clusters solaires et 83 % des
-clusters éoliens ne contenaient qu'un niveau de sévérité ; 15 % et 50 % en regroupant les causes).
+Le clustering repose uniquement sur les embeddings du texte complet de chaque rapport, sans passe LLM
+préalable. Limite connue : le rapport décrit aussi les dégâts, si bien qu'une même cause peut être
+répartie en plusieurs clusters fins selon sa gravité ; l'agent de fusion les rassemble quand une même
+correction les traite. Une extraction LLM de la cause a été essayée puis retirée : elle laissait 19 %
+des incidents sans cause (rapports qui décrivent le constat sans dire pourquoi).
 
 ## Étapes
 
 Le traitement se fait par partition `asset_type` (`PARTITION_COL`). Les balayages, les fusions
 et les escalades restent à l'intérieur d'une partition.
 
-0. **Extraction de la cause** (`extraction.py`) : un appel LLM par incident, qui ne voit que la
-   description (ni site, ni identifiants, ni sévérité ou coût). Il renvoie la cause racine, un extrait
-   recopié mot pour mot (`indice`), la conséquence et le composant, avec les mots du rapport et sans
-   liste fermée. Le code cherche l'extrait dans la description (`QUOTE_MIN_MATCH`, accents et
-   ponctuation ignorés) ; si l'extrait est absent ou si le rapport ne dit pas la cause, l'incident va
-   dans le groupe `cause_non_precisee` (`UNKNOWN_CAUSE_LABEL`) : jamais clusterisé, ni diagnostiqué, ni
-   compté dans la concentration et les précurseurs, mais gardé dans la criticité.
-   `--extractions <csv>` reprend des extractions déjà faites (par exemple un `incidents_segmented.csv`
-   précédent) pour les incidents au texte identique ; leur extrait est revérifié de la même façon.
-1. **Embeddings et réduction** : embeddings de la cause extraite, puis UMAP (`UMAP_PARAMS`).
+1. **Embeddings et réduction** : embeddings du texte, puis UMAP (`UMAP_PARAMS`).
 2. **Balayage HDBSCAN** par `min_cluster_size` dans `MCS_SWEEP` (5 à 25). Sélection par DBCV :
    on retient le DBCV maximal parmi les réglages avec un taux d'isolés ≤ 35 % (`SWEEP_MAX_OUTLIER_RATE`)
    et au moins 2 clusters (`SWEEP_MIN_CLUSTERS`). À égalité, on prend le plus fin (plus petit
    `min_cluster_size`). Si aucun réglage n'est admissible, on prend le DBCV maximal global.
-3. **Étiquetage LLM des clusters fins** : un titre et un mécanisme par cluster, à partir des causes
-   et des conséquences représentatives.
-4. **Reclassement LLM des isolés** : les incidents isolés (cause connue, mais hors des clusters denses) sont rattachés à un cluster fin de leur
+3. **Étiquetage LLM des clusters fins** : un titre et un mode de défaillance par cluster, à partir des
+   rapports représentatifs et des mots-clés (la répartition des sévérités n'est pas montrée).
+4. **Reclassement LLM des isolés** : les incidents isolés sont rattachés à un cluster fin de leur
    partition, ou restent `isole_atypique` (`OUTLIER_LABEL`). Ils sont ensuite exclus de la fusion,
    de la fouille de précurseurs et du profil de concentration, mais gardés dans la criticité.
 5. **Agent de fusion** (`merging.py`) :
    - groupes candidats locaux : les `MERGE_NEIGHBOURS` centroïdes les plus proches et les paires de
      titres très proches (Jaccard ≥ 0,6), reliés en composantes connexes, découpées en lots de
      `MERGE_MAX_GROUP` ;
-   - le LLM voit, pour chaque cluster, des causes extraites (pas des rapports entiers). Il ne fusionne
-     que si **une seule action concrète** traite tous les membres ; il liste la
+   - le LLM ne fusionne que si **une seule action concrète** traite tous les membres ; il liste la
      conséquence évitée pour chaque membre. Il peut aussi signaler un cluster hétérogène
      (`flag_heterogeneous`) ;
    - garde-fou DBCV à trois paliers sur la chute relative : ≤ `MERGE_DBCV_MAX_DROP` (15 %) →
@@ -91,10 +82,10 @@ et les escalades restent à l'intérieur d'une partition.
     - les règles d'alerte ne peuvent être que des règles validées ;
     - les identifiants inventés sont supprimés ;
     - la cause commune doit être justifiée par des citations (`common_cause_quotes`), cherchées dans les
-      rapports du cluster ; sans citation trouvée, elle est remplacée par la cause extraite la plus
-      représentative du plus gros cluster fin (`common_cause_source` = `extraction`, sinon `diagnostic`) ;
-    - **fonctionnement nominal** : un appel séparé (`nominal_check`) montre au LLM les causes et
-      conséquences représentatives et lui pose deux questions : un défaut a-t-il été constaté sur
+      rapports du cluster ; les citations introuvables sont écartées, et sans aucune citation vérifiée
+      la cause est marquée non justifiée (`common_cause_source` = `non_citee`, sinon `citee`) ;
+    - **fonctionnement nominal** : un appel séparé (`nominal_check`) montre au LLM les rapports
+      représentatifs et lui pose deux questions : un défaut a-t-il été constaté sur
       l'équipement (`defect_found`) ? la seule conséquence est-elle une protection ou une mise en
       sécurité déclenchée par une condition extérieure (`protection_only`) ? Le cluster est proposé
       nominal (`nominal_proposed`) si oui à la seconde et non à la première, et accepté (`nominal`)
@@ -108,8 +99,8 @@ et les escalades restent à l'intérieur d'une partition.
 
 - **Littéraux propres au domaine** : uniquement dans `config.py` : `SEVERITY_ORDER`
   (`mineure < modérée < sévère`), `FRENCH_STOPWORDS`, `PARTITION_COL`, `EQUIPMENT_COL`,
-  `SEVERITY_COL`, `OUTLIER_LABEL`, `UNKNOWN_CAUSE_LABEL`. Aucun prompt ne nomme de cause, de composant ou
-  de site : les causes viennent des rapports.
+  `SEVERITY_COL`, `OUTLIER_LABEL`. Aucun prompt ne nomme de cause, de composant ou de site, ni ne donne
+  d'exemple tiré des résultats.
 - **Schéma d'entrée fixe** (`REQUIRED_COLUMNS` dans `pipeline.py`) : `incident_id`, `text`, `date`,
   `equipment_id`, `site`, `asset_type`, `severity`, `estimated_cost_eur`, `downtime_hours`. Si une
   colonne manque, le pipeline s'arrête avec la liste des colonnes absentes. Il n'y a pas de
@@ -121,7 +112,7 @@ Dossier `outputs/segmentation/` (schémas détaillés dans le [README racine](..
 
 | Fichier | Grain | Contenu principal |
 |---|---|---|
-| `incidents_segmented.csv` | incident | `fine_cluster_id`, `merged_cluster_id`, `cluster_id`, `problem_title`, `common_cause`, `cluster_criticality_tier`, `assignment_source` (`dense_cluster`, `llm_reassigned`, `unclassified_outlier`, `cause_unknown`), extraction : `cause_racine`, `cause_type`, `indice`, `consequence`, `composant_brut`, `cause_known`, `extraction_source` (`llm`, `import`) |
+| `incidents_segmented.csv` | incident | `fine_cluster_id`, `merged_cluster_id`, `cluster_id`, `problem_title`, `common_cause`, `cluster_criticality_tier`, `assignment_source` (`dense_cluster`, `llm_reassigned`, `unclassified_outlier`) |
 | `clusters_fine.csv` | cluster fin | `fine_cluster_id`, `partition`, `merged_cluster_id`, `size`, `fine_title`, `failure_mode`, `keywords` |
 | `clusters_merged.csv` | cluster fusionné | `merged_cluster_id`, `fine_cluster_ids`, criticité, fréquence, coûts, durées, diagnostic, `common_cause_quotes`, `prevented_outcomes`, `recommendations`, `early_warning_rules` (listes JSON), `common_cause_source`, `nominal`, `nominal_proposed`, `nominal_reason` |
 | `merge_log.json` | décision de fusion | `round`, `action`, `members`, `shared_remediation`, `prevented_outcomes`, `dbcv_before`, `dbcv_after`, `vetoed`, `critic_verdict` |
@@ -144,10 +135,8 @@ du prompt système et du prompt utilisateur.
   repose sur le critique. Utilisé seul, il s'est montré trop conciliant (même modèle que
   l'agent de fusion), d'où le veto ferme au-delà de 35 %. Toutes les décisions sont tracées dans
   `merge_log.json` pour audit.
-- **Rapports sans cause.** Les incidents dont le rapport ne dit pas pourquoi ils sont arrivés ne
-  sont pas devinés : ils restent dans `cause_non_precisee`. Le seul remède est un meilleur rapport.
-- **Cause et conséquence mêlées.** L'extraction peut encore glisser des mots de conséquence dans la
-  cause ; c'est pourquoi le prompt la sépare explicitement et que l'étiquetage voit les deux.
+- **Gravité dans le texte.** Les embeddings du rapport complet captent aussi la description des
+  dégâts : des clusters fins d'une même cause peuvent se distinguer surtout par leur gravité.
 - **Cache par hash.** Modifier un prompt invalide son cache : tous les appels concernés sont
   refaits au prochain lancement, avec un coût LLM.
 
@@ -164,9 +153,8 @@ Tests dans `tests/` (sans réseau ni LLM, le LLM est simulé), lancés par
 | `test_concentration.py` | concentration significative, cluster uniforme sans résultat, isolés exclus |
 | `test_precursors.py` | **injection synthétique** : un précurseur planté dans des données aléatoires doit ressortir significatif, un cluster sans structure (ou une machine « citron ») ne doit pas l'être ; règle de sévérité, récurrences séparées, nombre d'occurrences identique à un calcul naïf, durée d'exécution |
 | `test_precursor_agent.py` | contrôle de plausibilité : réponses valides, mal formées, exceptions, seules les paires significatives sont envoyées |
-| `test_extraction.py` | extraction : citation vérifiée (accents et ponctuation tolérés, invention refusée), cause inconnue, échec du LLM, le LLM ne voit ni site ni sévérité, reprise seulement si le texte est identique |
-| `test_diagnosis.py` | diagnostic validé : cibles et règles inventées supprimées, périmètre des prompts borné, cause commune remplacée sans citation vérifiée, nominal refusé si le cluster n'est pas surtout de gravité minimale |
-| `test_pipeline_smoke.py` | exécution complète sur un échantillon de 200 incidents avec LLM et embeddings simulés : tous les fichiers de sortie existent avec leurs colonnes ; les rapports sans cause forment leur propre groupe ; `clusters_summary.csv` n'est pas produit ; colonnes obligatoires manquantes → erreur explicite |
+| `test_diagnosis.py` | diagnostic validé : cibles et règles inventées supprimées, périmètre des prompts borné, citations vérifiées dans les rapports (accents et ponctuation tolérés), nominal refusé si le cluster n'est pas surtout de gravité minimale |
+| `test_pipeline_smoke.py` | exécution complète sur un échantillon de 200 incidents avec LLM et embeddings simulés : tous les fichiers de sortie existent avec leurs colonnes ; `clusters_summary.csv` n'est pas produit ; colonnes obligatoires manquantes → erreur explicite |
 
 Le test d'injection (`test_precursors.py`) est la vérification de référence de la fouille de
 précurseurs : il contrôle à la fois la détection d'un signal réel et l'absence de faux positifs

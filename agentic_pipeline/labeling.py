@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 
 from .clustering import extract_ctfidf_keywords, representative_indices
-from .config import CAUSE_QUOTE_COL, CONSEQUENCE_COL, OUTLIER_LABEL, SEVERITY_COL, TEXT_COL
+from .config import OUTLIER_LABEL, SEVERITY_COL, TEXT_COL
 from .llm_client import call_llm_json
 
 
@@ -20,19 +20,16 @@ class FineCard(TypedDict):
     size: int
     keywords: list[str]
     representative_texts: list[str]
-    representative_quotes: list[str]
-    representative_consequences: list[str]
     severity_distribution: dict[str, int]
 
 
 SYSTEM_FINE_LABEL_PROMPT = """Tu es un expert en fiabilité industrielle.
-On te présente un petit groupe d'incidents (cluster fin) d'un même type d'actif, regroupés par leur
-cause racine telle qu'extraite des rapports. Donne-lui une étiquette courte et factuelle, SANS
-recommandation ni action corrective.
+On te présente un petit groupe d'incidents très similaires (cluster fin) d'un même type d'actif.
+Donne-lui une étiquette courte et factuelle, SANS recommandation ni action corrective.
 
 Réponds STRICTEMENT avec un objet JSON (textes en français) :
-- "fine_title" : intitulé court (max ~8 mots) de la cause commune.
-- "failure_mode" : une phrase décrivant le mécanisme (cause, composant concerné, ce qui se produit)."""
+- "fine_title" : intitulé court (max ~8 mots) du mode de défaillance observé.
+- "failure_mode" : une phrase décrivant le mode de défaillance (ce qui se produit, composant concerné)."""
 
 
 def build_fine_cards(
@@ -61,11 +58,6 @@ def build_fine_cards(
     keywords = extract_ctfidf_keywords(texts, int_labels)
     reps = representative_indices(np.asarray(embeddings), int_labels)
 
-    def column(col: str, k: int) -> list[str]:
-        if col not in df.columns:
-            return []
-        return [str(df.at[i, col]) for i in reps.get(k, []) if pd.notna(df.at[i, col])]
-
     cards: dict[str, FineCard] = {}
     for fid in ids:
         k = code[fid]
@@ -77,8 +69,6 @@ def build_fine_cards(
             size=int(len(sub)),
             keywords=list(keywords.get(k, [])),
             representative_texts=[texts[i] for i in reps.get(k, [])],
-            representative_quotes=column(CAUSE_QUOTE_COL, k),
-            representative_consequences=column(CONSEQUENCE_COL, k),
             severity_distribution={str(a): int(b) for a, b in sev.items()},
         )
     return cards
@@ -91,16 +81,12 @@ def _default_label(card: FineCard) -> dict[str, str]:
 
 def _card_prompt(card: FineCard) -> str:
     texts = "\n".join(f"- {t.strip()}" for t in card["representative_texts"])
-    out = (
+    return (
         f"Type d'actif : {card['partition']}\n"
         f"Taille : {card['size']} incidents\n"
         f"Mots-clés : {', '.join(card['keywords'])}\n"
         f"Incidents représentatifs :\n{texts}\n"
     )
-    consequences = card.get("representative_consequences") or []
-    if consequences:
-        out += "Conséquences :\n" + "\n".join(f"- {c.strip()}" for c in consequences) + "\n"
-    return out
 
 
 def label_fine_clusters(

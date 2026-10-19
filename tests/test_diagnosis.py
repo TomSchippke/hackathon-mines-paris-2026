@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from agentic_pipeline.diagnosis import _build_user_prompt, build_diagnosis_context, diagnose_merged_cluster
+from agentic_pipeline.diagnosis import build_diagnosis_context, diagnose_merged_cluster, quote_found
 
 M = "Pompe_M1"
 
@@ -109,7 +109,7 @@ def test_prompt_size_bounded(no_llm):
                fine_cards={f"Pompe_F{i}": {"keywords": [], "size": 1, "representative_texts": ["y" * 5000] * 4}
                            for i in range(20)})
     diagnose_merged_cluster(ctx, llm=llm)
-    assert seen["p"].count("Cause :") <= 8
+    assert seen["p"].count("Exemple :") <= 8
     assert len(seen["p"]) < 12000
 
 
@@ -158,28 +158,31 @@ def test_unhashable_llm_values_do_not_discard_response(no_llm):
     assert [x["rule_id"] for x in out["early_warning_rules"]] == ["Pompe_M3->Pompe_M1@30d"]
 
 
+REPORT = "Arrêt de sécurité de la pompe. Le joint était usé par la chaleur du moteur voisin."
+
+
 def _cited_ctx(mild_share=0.9):
-    cards = {"Pompe_F1": {"size": 10, "keywords": [], "representative_texts": ["Joint usé par la chaleur"],
-                          "representative_quotes": ["le joint était usé par la chaleur du moteur"],
-                          "representative_consequences": ["arrêt de sécurité de la pompe"]}}
-    return _ctx(fine_cards=cards, member_fine_ids=["Pompe_F1"],
-                member_texts=["Arrêt de la pompe. Le joint était usé par la chaleur du moteur voisin."],
-                mild_share=mild_share)
+    cards = {"Pompe_F1": {"size": 10, "keywords": [], "representative_texts": [REPORT]}}
+    return _ctx(fine_cards=cards, member_fine_ids=["Pompe_F1"], member_texts=[REPORT], mild_share=mild_share)
+
+
+def test_quote_found_tolerates_accents_and_punctuation_only():
+    assert quote_found("le joint etait use par la chaleur du moteur", REPORT)
+    assert not quote_found("le joint était cassé par la foudre", REPORT)
+    assert not quote_found("joint usé", REPORT)  # trop court pour être vérifiable
 
 
 def test_common_cause_needs_a_quote_from_the_reports(no_llm):
     ctx = _cited_ctx()
-    assert "Citation : « le joint était usé par la chaleur du moteur »" in _build_user_prompt(ctx)
-
     out = diagnose_merged_cluster(ctx, llm=lambda **kw: {
         "common_cause": "Chaleur du moteur voisin", "common_cause_quotes": ["Le joint était usé par la chaleur"]})
-    assert out["common_cause"] == "Chaleur du moteur voisin" and out["common_cause_source"] == "diagnostic"
+    assert out["common_cause"] == "Chaleur du moteur voisin" and out["common_cause_source"] == "citee"
+    assert out["common_cause_quotes"] == ["Le joint était usé par la chaleur"]
 
-    # Citation absente des rapports : la cause du LLM est remplacée par la cause extraite
+    # Citation absente des rapports : écartée, cause marquée non justifiée
     out = diagnose_merged_cluster(ctx, llm=lambda **kw: {
         "common_cause": "Défaut de fabrication", "common_cause_quotes": ["un défaut de fabrication du joint"]})
-    assert out["common_cause"] == "Joint usé par la chaleur" and out["common_cause_source"] == "extraction"
-    assert out["common_cause_quotes"] == ["le joint était usé par la chaleur du moteur"]
+    assert out["common_cause_source"] == "non_citee" and out["common_cause_quotes"] == []
 
 
 def test_nominal_needs_protection_only_no_defect_and_mild_severity(no_llm):
@@ -188,7 +191,7 @@ def test_nominal_needs_protection_only_no_defect_and_mild_severity(no_llm):
     def llm_for(protection_only, defect_found):
         def llm(**kw):
             if kw["cache_tag"] == "nominal_check":
-                assert "Conséquence : arrêt de sécurité de la pompe" in kw["user_prompt"]
+                assert REPORT in kw["user_prompt"]
                 return {"protection_only": protection_only, "defect_found": defect_found,
                         "reason": "protection déclenchée comme prévu"}
             return {"recommendations": [rec]}

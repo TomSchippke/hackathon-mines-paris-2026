@@ -56,12 +56,9 @@ def main() -> None:
             incidents_file = args.out_dir / "incidents_full.csv"
             if not incidents_file.exists():
                 incidents_file = Path("data/incidents_full.csv")
-            # Les causes déjà extraites au lancement précédent sont reprises (texte identique) : pas de nouvel appel
-            previous = args.out_dir / "segmentation" / "incidents_segmented.csv"
             run_agentic_segmentation(
                 input_csv=incidents_file,
                 out_dir=args.out_dir / "segmentation",
-                extractions_csv=previous if previous.exists() else None,
             )
         elif step == "equipment":
             incidents_file = args.out_dir / "segmentation" / "incidents_segmented.csv"
