@@ -7,7 +7,6 @@ import json
 import os
 import re
 import time
-from pathlib import Path
 from typing import Any
 
 from dotenv import find_dotenv, load_dotenv

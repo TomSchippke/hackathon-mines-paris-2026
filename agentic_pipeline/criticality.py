@@ -48,20 +48,18 @@ def compute_cluster_criticality(
     else:
         cum_cost_ratio = pd.Series(0.0, index=summary.index)
 
-    def assign_tier(ratio: float, rank: int, total_clusters: int) -> str:
-        # Si un cluster unique concentre la majorité ou rank 1 dans petit groupe
+    def assign_tier(ratio: float, rank: int) -> str:
+        # Le premier cluster est toujours critique, même s'il dépasse seul 70 % du coût
         if ratio <= 0.70 or rank == 1:
             return "Critique"
-        elif ratio <= 0.90:
+        if ratio <= 0.90:
             return "Élevée"
-        elif ratio <= 0.98:
+        if ratio <= 0.98:
             return "Moyenne"
-        else:
-            return "Faible"
+        return "Faible"
 
     summary["criticality_tier"] = [
-        assign_tier(r, rank, len(summary))
-        for r, rank in zip(cum_cost_ratio, summary["criticality_rank"])
+        assign_tier(r, rank) for r, rank in zip(cum_cost_ratio, summary["criticality_rank"])
     ]
 
     return summary

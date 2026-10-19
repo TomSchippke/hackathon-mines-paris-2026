@@ -54,10 +54,7 @@ REQUIRED_COLUMNS = [
 ]
 MERGED_COL = "merged_cluster_id"
 FINE_COL = "fine_cluster_id"
-CONCENTRATION_COLUMNS = [
-    MERGED_COL, "dimension", "value", "observed", "expected", "lift", "p_value", "q_value", "significant",
-    "evidence_level",
-]
+SWEEP_COLUMNS = ["partition", "min_cluster_size", "n_clusters", "outlier_rate", "dbcv"]
 JSON_LIST_COLS = ["fine_cluster_ids", "prevented_outcomes", "recommendations", "early_warning_rules",
                   "common_cause_quotes"]
 DIAGNOSIS_KEYS = ["problem_title", "problem_description", "common_cause", "common_cause_quotes",
@@ -371,12 +368,10 @@ def run_agentic_segmentation(
     n_plaus = int((pairs["significant"].astype(bool) & pairs["plausible"].astype(bool)
                    & (pairs["kind"] != "recurrence")).sum()) if len(pairs) else 0
     print(f"       -> {n_plaus} règles significatives et plausibles.")
-    ev_parts = []
-    non_esc, esc_rows = pairs[pairs["kind"] != "escalation"], pairs[pairs["kind"] == "escalation"]
-    if len(non_esc):
-        ev_parts.append(extract_evidence(df, non_esc, label_col=MERGED_COL))
-    if len(esc_rows):
-        ev_parts.append(extract_evidence(df, esc_rows, label_col=FINE_COL))
+    # Preuves au niveau fusionné, sauf escalades (niveau fin)
+    is_esc = pairs["kind"] == "escalation"
+    ev_parts = [extract_evidence(df, pairs[~is_esc], label_col=MERGED_COL),
+                extract_evidence(df, pairs[is_esc], label_col=FINE_COL)]
     ev_parts = [e for e in ev_parts if len(e)]
     evidence = pd.concat(ev_parts, ignore_index=True) if ev_parts else pd.DataFrame(columns=EVIDENCE_COLUMNS)
 
@@ -451,8 +446,7 @@ def run_agentic_segmentation(
     fine_df = pd.DataFrame(fine_rows, columns=[FINE_COL, "partition", MERGED_COL, "size",
                                                "fine_title", "failure_mode", "keywords"])
     sweep_df = (pd.concat(sweep_tables, ignore_index=True) if sweep_tables
-                else pd.DataFrame(columns=["partition", "min_cluster_size", "n_clusters", "outlier_rate", "dbcv"]))
-    sweep_df = sweep_df[["partition", "min_cluster_size", "n_clusters", "outlier_rate", "dbcv"]]
+                else pd.DataFrame(columns=SWEEP_COLUMNS))[SWEEP_COLUMNS]
 
     paths = {
         "incidents_segmented": out_dir / "incidents_segmented.csv",
@@ -469,11 +463,11 @@ def run_agentic_segmentation(
     merged_csv.to_csv(paths["clusters_merged"], index=False)
     paths["merge_log"].write_text(
         json.dumps(log, ensure_ascii=False, indent=2, default=_json_default), encoding="utf-8")
-    (conc if len(conc) else pd.DataFrame(columns=CONCENTRATION_COLUMNS)).to_csv(paths["concentration"], index=False)
+    conc.to_csv(paths["concentration"], index=False)
     pairs[PAIR_COLUMNS].to_csv(paths["precursor_pairs"], index=False)
     evidence[EVIDENCE_COLUMNS].to_csv(paths["precursor_evidence"], index=False)
     sweep_df.to_csv(paths["fine_sweep"], index=False)
-    for name, p in paths.items():
+    for p in paths.values():
         print(f"       ✓ {p}")
 
     # --- Synthèse console

@@ -13,6 +13,7 @@ from typing import Sequence
 import numpy as np
 import pandas as pd
 
+from .concentration import _benjamini_hochberg
 from .config import (
     DATE_COL,
     EQUIPMENT_COL,
@@ -38,6 +39,9 @@ EVIDENCE_COLUMNS = [
     "rule_id", "consequent_incident_id", "equipment_id", "consequent_date",
     "antecedent_incident_ids", "antecedent_dates", "n_antecedents", "window_days",
 ]
+# Colonnes des lignes testées avant correction BH (_test_partition)
+_ROW_COLUMNS = ["partition", "antecedent", "consequent", "window_days", "n_hits", "n_equipments",
+                "n_consequent", "expected_hits", "lift", "p_value"]
 _GLOBAL = "global"
 _SECONDS_PER_DAY = 86400.0
 
@@ -192,9 +196,7 @@ def _test_partition(
                     float(obs[k][b, a] / max(exp[b, a], 1e-9)) if t else np.nan,
                     (1 + ge[k][b, a]) / (1 + n_permutations) if t else np.nan,
                 ))
-    return pd.DataFrame(records, columns=[
-        "partition", "antecedent", "consequent", "window_days", "n_hits", "n_equipments",
-        "n_consequent", "expected_hits", "lift", "p_value"])
+    return pd.DataFrame(records, columns=_ROW_COLUMNS)
 
 
 def _compute_rows(
@@ -207,33 +209,16 @@ def _compute_rows(
                         min_hits, min_equipments)
         for _, g in work.groupby("partition", sort=True)
     ]
-    return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(
-        columns=["partition", "antecedent", "consequent", "window_days", "n_hits",
-                 "n_equipments", "n_consequent", "expected_hits", "lift", "p_value"])
+    return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=_ROW_COLUMNS)
 
 
 # ---------------------------------------------------------------------------
 # Correction BH et mise en forme
 # ---------------------------------------------------------------------------
 
-def _benjamini_hochberg(p: np.ndarray) -> np.ndarray:
-    """Q-values de Benjamini-Hochberg (p sans NaN)."""
-    m = len(p)
-    if m == 0:
-        return p.copy()
-    order = np.argsort(p, kind="stable")
-    q = p[order] * m / np.arange(1, m + 1)
-    q = np.minimum.accumulate(q[::-1])[::-1]
-    out = np.empty(m)
-    out[order] = np.minimum(q, 1.0)
-    return out
-
-
 def _finalize(rows: pd.DataFrame, kind: str, fdr: float) -> pd.DataFrame:
     """Une correction BH par ``kind`` (recurrence vs precursor/escalation) sur les lignes testées."""
     rows = rows.copy()
-    if "scope_cluster" not in rows.columns:
-        rows["scope_cluster"] = ""
     rows["kind"] = np.where(rows["antecedent"] == rows["consequent"], "recurrence", kind)
     rows["q_value"] = np.nan
     tested = rows["p_value"].notna().to_numpy()
@@ -290,43 +275,35 @@ def mine_escalations(
     df: pd.DataFrame,
     fine_col: str = "fine_cluster_id",
     merged_col: str = "merged_cluster_id",
-    **kwargs,
+    windows: Sequence[int] = PRECURSOR_WINDOWS,
+    n_permutations: int = PRECURSOR_N_PERMUTATIONS,
+    random_state: int = RANDOM_STATE,
+    min_hits: int = PRECURSOR_MIN_HITS,
+    min_equipments: int = PRECURSOR_MIN_EQUIPMENTS,
+    fdr: float = PRECURSOR_FDR,
+    equipment_col: str = EQUIPMENT_COL,
+    date_col: str = DATE_COL,
+    severity_col: str = SEVERITY_COL,
+    id_col: str = ID_COL,
+    partition_col: str | None = PARTITION_COL,
 ) -> pd.DataFrame:
     """Escalade fine au sein de chaque cluster fusionné ayant au moins 2 clusters fins.
 
     Un seul appel, donc une seule correction BH sur l'ensemble des lignes testées.
     """
-    windows = kwargs.get("windows", PRECURSOR_WINDOWS)
-    n_permutations = kwargs.get("n_permutations", PRECURSOR_N_PERMUTATIONS)
-    random_state = kwargs.get("random_state", RANDOM_STATE)
-    min_hits = kwargs.get("min_hits", PRECURSOR_MIN_HITS)
-    min_equipments = kwargs.get("min_equipments", PRECURSOR_MIN_EQUIPMENTS)
-    fdr = kwargs.get("fdr", PRECURSOR_FDR)
-    cols = dict(
-        equipment_col=kwargs.get("equipment_col", EQUIPMENT_COL),
-        date_col=kwargs.get("date_col", DATE_COL),
-        severity_col=kwargs.get("severity_col", SEVERITY_COL),
-        id_col=kwargs.get("id_col", ID_COL),
-        partition_col=kwargs.get("partition_col", PARTITION_COL),
-    )
     valid = df[df[merged_col].notna() & ~df[merged_col].isin(NOISE_LABELS)
                & df[fine_col].notna() & ~df[fine_col].isin(NOISE_LABELS)]
     chunks = []
     for merged_id, sub in valid.groupby(merged_col, sort=True):
         if sub[fine_col].nunique() < 2:
             continue
-        work = _prepare(sub, fine_col, cols["equipment_col"], cols["date_col"],
-                        cols["severity_col"], cols["id_col"], cols["partition_col"])
-        rows = _compute_rows(work, windows, n_permutations, random_state,
-                             min_hits, min_equipments)
+        work = _prepare(sub, fine_col, equipment_col, date_col, severity_col, id_col, partition_col)
+        rows = _compute_rows(work, windows, n_permutations, random_state, min_hits, min_equipments)
         rows["scope_cluster"] = str(merged_id)
         chunks.append(rows)
-    if not chunks:
-        return _finalize(pd.DataFrame(columns=[
-            "partition", "antecedent", "consequent", "window_days", "n_hits", "n_equipments",
-            "n_consequent", "expected_hits", "lift", "p_value", "scope_cluster"]),
-            "escalation", fdr)
-    return _finalize(pd.concat(chunks, ignore_index=True), "escalation", fdr)
+    rows = (pd.concat(chunks, ignore_index=True) if chunks
+            else pd.DataFrame(columns=[*_ROW_COLUMNS, "scope_cluster"]))
+    return _finalize(rows, "escalation", fdr)
 
 
 def extract_evidence(

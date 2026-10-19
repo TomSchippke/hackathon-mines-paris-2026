@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-# Noms de colonnes du schéma d'entrée (contrat fixe : voir REQUIRED_COLUMNS dans pipeline.py)
+
 # Chemins d'entrée et de sortie par défaut
 DEFAULT_INPUT = Path("outputs/incidents_full.csv")
 FALLBACK_INPUT = Path("data/incidents_full.csv")
@@ -11,16 +11,15 @@ DEFAULT_OUT_DIR = Path("outputs/segmentation")
 CACHE_DIR = Path("outputs/cache/agent")
 EMBEDDINGS_CACHE_DIR = Path("outputs/cache")
 
-# Noms de colonnes standards attendus (avec auto-détection intelligente en secours)
+# Noms de colonnes du schéma d'entrée (contrat fixe : voir REQUIRED_COLUMNS dans pipeline.py)
 TEXT_COL = "text"
 COST_COL = "estimated_cost_eur"
 DOWNTIME_COL = "downtime_hours"
 DATE_COL = "date"
 ID_COL = "incident_id"
 
-# Paramètres de clustering (UMAP & HDBSCAN)
-MIN_CLUSTER_SIZE = 10
-UMAP_PARAMS = dict(n_neighbors=15, n_components=5, min_dist=0.0, metric="cosine", random_state=42)
+# Paramètres UMAP (graine : RANDOM_STATE) et n-grammes des mots-clés c-TF-IDF
+UMAP_PARAMS = dict(n_neighbors=15, n_components=5, min_dist=0.0, metric="cosine")
 NGRAM_RANGE = (1, 2)
 
 # Nombre d'incidents représentatifs transmis à l'agent par cluster
@@ -40,7 +39,6 @@ FRENCH_STOPWORDS = [
 # --- Clustering v2 (voir docs/implementation_plan_clustering_v2.md) ---
 
 # Littéraux propres au domaine : seul endroit où ils sont définis
-LANGUAGE = "fr"
 SEVERITY_ORDER = ["mineure", "modérée", "sévère"]  # rang 0 < 1 < 2
 PARTITION_COL = "asset_type"
 EQUIPMENT_COL = "equipment_id"

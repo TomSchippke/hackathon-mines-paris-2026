@@ -4,7 +4,7 @@ __all__ = ["run_agentic_segmentation"]
 
 
 def __getattr__(name: str):
-    # Import paresseux : les sous-modules restent importables même si pipeline.py est en chantier
+    # Import paresseux : importer un sous-module (config, concentration...) ne charge pas UMAP ni HDBSCAN
     if name == "run_agentic_segmentation":
         from .pipeline import run_agentic_segmentation
 

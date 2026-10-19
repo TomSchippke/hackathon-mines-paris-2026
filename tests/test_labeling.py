@@ -31,9 +31,7 @@ def test_build_fine_cards():
     assert c["partition"] == "P" and c["size"] == 5
     assert c["fine_cluster_id"] == "P_F0"
     assert c["severity_distribution"] == {"mineure": 3, "sévère": 1, "modérée": 1}
-    assert c["mean_cost"] == 200.0
     assert len(c["representative_texts"]) == 4
-    assert c["metadata_profile"]["count"] == 5
     assert all("fuite" in t for t in c["representative_texts"])
 
 
@@ -111,7 +109,7 @@ def test_reassign_reason_none(no_llm):
 
 def test_default_label_empty_keywords_and_caps(no_llm):
     card = {"fine_cluster_id": "P_F7", "partition": "P", "size": 1, "keywords": [],
-            "representative_texts": [], "metadata_profile": {}, "severity_distribution": {}, "mean_cost": 0.0}
+            "representative_texts": [], "severity_distribution": {}}
     out = label_fine_clusters({"P_F7": card}, llm=lambda **kw: {})
     assert out["P_F7"]["fine_title"] == "P_F7"
     out = label_fine_clusters({"P_F7": card}, llm=lambda **kw: {"fine_title": "t" * 900, "failure_mode": "m" * 900})

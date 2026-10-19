@@ -108,7 +108,7 @@ et les escalades restent à l'intérieur d'une partition.
 ## Littéraux du domaine et schéma d'entrée
 
 - **Littéraux propres au domaine** : uniquement dans `config.py` : `SEVERITY_ORDER`
-  (`mineure < modérée < sévère`), `LANGUAGE`, `FRENCH_STOPWORDS`, `PARTITION_COL`, `EQUIPMENT_COL`,
+  (`mineure < modérée < sévère`), `FRENCH_STOPWORDS`, `PARTITION_COL`, `EQUIPMENT_COL`,
   `SEVERITY_COL`, `OUTLIER_LABEL`, `UNKNOWN_CAUSE_LABEL`. Aucun prompt ne nomme de cause, de composant ou
   de site : les causes viennent des rapports.
 - **Schéma d'entrée fixe** (`REQUIRED_COLUMNS` dans `pipeline.py`) : `incident_id`, `text`, `date`,

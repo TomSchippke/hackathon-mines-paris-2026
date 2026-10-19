@@ -7,20 +7,8 @@ from typing import Any, Callable, TypedDict
 import numpy as np
 import pandas as pd
 
-from .clustering import (
-    extract_ctfidf_keywords,
-    get_cluster_metadata_profile,
-    representative_indices,
-)
-from .config import (
-    CAUSE_QUOTE_COL,
-    CONSEQUENCE_COL,
-    COST_COL,
-    NUM_REPRESENTATIVE_DOCS,
-    OUTLIER_LABEL,
-    SEVERITY_COL,
-    TEXT_COL,
-)
+from .clustering import extract_ctfidf_keywords, representative_indices
+from .config import CAUSE_QUOTE_COL, CONSEQUENCE_COL, OUTLIER_LABEL, SEVERITY_COL, TEXT_COL
 from .llm_client import call_llm_json
 
 
@@ -34,9 +22,7 @@ class FineCard(TypedDict):
     representative_texts: list[str]
     representative_quotes: list[str]
     representative_consequences: list[str]
-    metadata_profile: dict[str, Any]
     severity_distribution: dict[str, int]
-    mean_cost: float
 
 
 SYSTEM_FINE_LABEL_PROMPT = """Tu es un expert en fiabilité industrielle.
@@ -55,8 +41,6 @@ def build_fine_cards(
     embeddings: np.ndarray,
     partition: str,
     text_col: str = TEXT_COL,
-    cost_col: str = COST_COL,
-    severity_col: str = SEVERITY_COL,
 ) -> dict[str, FineCard]:
     """Construit une fiche par cluster fin d'une partition (le bruit OUTLIER_LABEL est ignoré).
 
@@ -75,27 +59,18 @@ def build_fine_cards(
     texts = df[text_col].astype(str).tolist()
 
     keywords = extract_ctfidf_keywords(texts, int_labels)
-    reps = representative_indices(np.asarray(embeddings), int_labels, n_docs=NUM_REPRESENTATIVE_DOCS)
+    reps = representative_indices(np.asarray(embeddings), int_labels)
 
     def column(col: str, k: int) -> list[str]:
         if col not in df.columns:
             return []
         return [str(df.at[i, col]) for i in reps.get(k, []) if pd.notna(df.at[i, col])]
-    work = df.assign(_fine_int=int_labels)
 
     cards: dict[str, FineCard] = {}
     for fid in ids:
         k = code[fid]
-        sub = work[work["_fine_int"] == k]
-        if severity_col in sub.columns:
-            sev = {str(a): int(b) for a, b in sub[severity_col].value_counts().items()}
-        else:
-            sev = {}
-        if cost_col in sub.columns:
-            mc = pd.to_numeric(sub[cost_col], errors="coerce").mean()
-            mean_cost = float(mc) if pd.notna(mc) else 0.0
-        else:
-            mean_cost = 0.0
+        sub = df[int_labels == k]
+        sev = sub[SEVERITY_COL].value_counts() if SEVERITY_COL in sub.columns else {}
         cards[fid] = FineCard(
             fine_cluster_id=fid,
             partition=partition,
@@ -104,9 +79,7 @@ def build_fine_cards(
             representative_texts=[texts[i] for i in reps.get(k, [])],
             representative_quotes=column(CAUSE_QUOTE_COL, k),
             representative_consequences=column(CONSEQUENCE_COL, k),
-            metadata_profile=get_cluster_metadata_profile(work, k, label_col="_fine_int"),
-            severity_distribution=sev,
-            mean_cost=mean_cost,
+            severity_distribution={str(a): int(b) for a, b in sev.items()},
         )
     return cards
 

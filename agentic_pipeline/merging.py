@@ -302,16 +302,13 @@ def run_merge_agent(
     counter = 0
     rejected: list[frozenset[str]] = []  # ensembles de clusters fins déjà refusés : jamais reproposés
 
-    def node_mask(nid: str) -> np.ndarray:
-        return cur == nid
-
     for rnd in range(1, max_rounds + 1):
         ids = sorted(nodes)
         if len(ids) < 2:
             break
         centroids: dict[str, np.ndarray] = {}
         for nid in ids:
-            c = E[node_mask(nid)].mean(axis=0)
+            c = E[cur == nid].mean(axis=0)
             centroids[nid] = c / (np.linalg.norm(c) or 1.0)
         node_titles = {nid: " ".join(_title(titles, f) for f in nodes[nid].members) for nid in ids}
         groups = _candidate_groups(ids, centroids, node_titles)
@@ -453,13 +450,12 @@ def run_merge_agent(
                     assigned.append(code[s])
                 trial_fine = fine.copy()
                 trial_fine[rows] = np.array(assigned, dtype=object)
+                new_cards, new_titles = {}, {}
                 if relabel is not None:
                     try:
                         new_cards, new_titles = relabel(trial_fine.copy(), list(new_ids))
                     except Exception:
-                        new_cards, new_titles = {}, {}
-                else:
-                    new_cards, new_titles = {}, {}
+                        pass
                 # Contrôle sémantique : si deux sous-groupes reçoivent le même intitulé, ce n'est
                 # pas un mélange de modes de défaillance, le découpage est refusé
                 sub_tokens = [_tokens(new_titles[n].get("fine_title", "")) for n in new_ids if n in new_titles]
@@ -476,11 +472,10 @@ def run_merge_agent(
                     entry["dbcv_after"] = float(dbcv_score(X, cur))
                     entry["result_id"] = list(new_ids)
                     entry["accepted"] = True
-                    parent_card = cards.get(fid, {})
+                    parent_card, pt = cards.get(fid, {}), titles.get(fid, {})
                     for j, nid in enumerate(new_ids):
                         size = int((cur == nid).sum())
                         cards[nid] = dict(new_cards.get(nid) or _minimal_card(parent_card, size))
-                        pt = titles.get(fid, {})
                         titles[nid] = dict(
                             new_titles.get(nid)
                             or {
@@ -497,7 +492,7 @@ def run_merge_agent(
             break
 
     # -------- numérotation finale par taille décroissante
-    order = sorted(nodes.values(), key=lambda n: (-int(node_mask(n.id).sum()), sorted(n.members)[0]))
+    order = sorted(nodes.values(), key=lambda n: (-int((cur == n.id).sum()), sorted(n.members)[0]))
     final_id = {n.id: f"{partition}_M{k}" for k, n in enumerate(order)}
     fine_to_merged: dict[str, str] = {}
     merged_members: dict[str, list[str]] = {}
@@ -513,9 +508,8 @@ def run_merge_agent(
         return final_id.get(x, x)
 
     for e in log:
-        if e["action"] == "merge":
-            if e["result_id"] is not None:
-                e["result_id"] = resolve(e["result_id"])
+        if e["action"] == "merge" and e["result_id"] is not None:
+            e["result_id"] = resolve(e["result_id"])
 
     return MergeResult(
         fine_labels=fine,

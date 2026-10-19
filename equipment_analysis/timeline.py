@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import pandas as pd
-import numpy as np
 from typing import Sequence
 
+import pandas as pd
+
 from .config import (
-    ASSET_COL,
     CLUSTER_COL,
     COST_COL,
     DATE_COL,
@@ -17,7 +16,6 @@ from .config import (
     PROBLEM_COL,
     RECURRENCE_WINDOWS,
     SEVERITY_COL,
-    SITE_COL,
     TECHNICIAN_COL,
 )
 
@@ -34,8 +32,7 @@ def compute_equipment_timeline(
     df = df.copy()
 
     # S'assurer de la présence des colonnes minimales
-    required_cols = [EQUIPMENT_COL, DATE_COL]
-    for col in required_cols:
+    for col in (EQUIPMENT_COL, DATE_COL):
         if col not in df.columns:
             raise KeyError(f"Colonne requise manquante : {col}")
 

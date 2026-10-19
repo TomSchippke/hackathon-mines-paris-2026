@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -30,7 +29,6 @@ from .config import (
 )
 
 
-
 @dataclass
 class SweepResult:
     """Résultat du balayage HDBSCAN : meilleur réglage retenu et table de tous les essais."""
@@ -48,8 +46,7 @@ def embed_partition(texts: list[str]) -> np.ndarray:
 
 def reduce_umap(emb: np.ndarray) -> np.ndarray:
     """Réduction UMAP des embeddings (paramètres et graine fixés dans la config)."""
-    params = dict(UMAP_PARAMS)
-    params["random_state"] = RANDOM_STATE
+    params = dict(UMAP_PARAMS, random_state=RANDOM_STATE)
     n = len(emb)
     # Garde-fou pour les petites partitions : init spectrale impossible (eigsh exige k < N)
     params["n_neighbors"] = max(2, min(params["n_neighbors"], n - 1))
@@ -168,27 +165,3 @@ def representative_indices(
         sims = cosine_similarity(cluster_emb.mean(axis=0, keepdims=True), cluster_emb)[0]
         representatives[label] = [int(idx[i]) for i in sims.argsort()[::-1][:n_docs]]
     return representatives
-
-
-def select_representative_documents(
-    texts: list[str],
-    embeddings: np.ndarray,
-    labels: np.ndarray,
-    n_docs: int = NUM_REPRESENTATIVE_DOCS,
-) -> dict[int, list[str]]:
-    """Sélectionne les incidents les plus proches du centroïde géométrique de chaque cluster."""
-    return {label: [texts[i] for i in idx]
-            for label, idx in representative_indices(embeddings, labels, n_docs).items()}
-
-
-def get_cluster_metadata_profile(df: pd.DataFrame, cluster_label: int, label_col: str = "raw_cluster") -> dict[str, Any]:
-    """Extrait la répartition des métadonnées optionnelles pour enrichir le contexte de l'agent."""
-    sub = df[df[label_col] == cluster_label]
-    profile: dict[str, Any] = {"count": len(sub)}
-
-    for col in ["severity", "weather_condition", "site", "asset_type"]:
-        if col in sub.columns and sub[col].notna().any():
-            top_vals = sub[col].value_counts().head(3).to_dict()
-            profile[col] = top_vals
-
-    return profile
