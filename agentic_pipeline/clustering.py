@@ -152,6 +152,24 @@ def extract_ctfidf_keywords(
         return {c: [] for c in clusters}
 
 
+def representative_indices(
+    embeddings: np.ndarray,
+    labels: np.ndarray,
+    n_docs: int = NUM_REPRESENTATIVE_DOCS,
+) -> dict[int, list[int]]:
+    """Positions des incidents les plus proches du centroïde de chaque cluster (bruit : les premiers)."""
+    representatives: dict[int, list[int]] = {}
+    for label in np.unique(labels):
+        idx = np.where(labels == label)[0]
+        if label == -1 or len(idx) <= n_docs:
+            representatives[label] = idx[:n_docs].tolist()
+            continue
+        cluster_emb = embeddings[idx]
+        sims = cosine_similarity(cluster_emb.mean(axis=0, keepdims=True), cluster_emb)[0]
+        representatives[label] = [int(idx[i]) for i in sims.argsort()[::-1][:n_docs]]
+    return representatives
+
+
 def select_representative_documents(
     texts: list[str],
     embeddings: np.ndarray,
@@ -159,28 +177,8 @@ def select_representative_documents(
     n_docs: int = NUM_REPRESENTATIVE_DOCS,
 ) -> dict[int, list[str]]:
     """Sélectionne les incidents les plus proches du centroïde géométrique de chaque cluster."""
-    representatives: dict[int, list[str]] = {}
-    unique_labels = np.unique(labels)
-
-    for label in unique_labels:
-        if label == -1:
-            # Pour le bruit, on prend un échantillon aléatoire ou les premiers
-            idx = np.where(labels == -1)[0][:n_docs]
-            representatives[label] = [texts[i] for i in idx]
-            continue
-
-        idx = np.where(labels == label)[0]
-        if len(idx) <= n_docs:
-            representatives[label] = [texts[i] for i in idx]
-            continue
-
-        cluster_emb = embeddings[idx]
-        centroid = cluster_emb.mean(axis=0, keepdims=True)
-        sims = cosine_similarity(centroid, cluster_emb)[0]
-        top_local_idx = sims.argsort()[::-1][:n_docs]
-        representatives[label] = [texts[idx[i]] for i in top_local_idx]
-
-    return representatives
+    return {label: [texts[i] for i in idx]
+            for label, idx in representative_indices(embeddings, labels, n_docs).items()}
 
 
 def get_cluster_metadata_profile(df: pd.DataFrame, cluster_label: int, label_col: str = "raw_cluster") -> dict[str, Any]:

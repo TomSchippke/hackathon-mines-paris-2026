@@ -46,6 +46,9 @@ PARTITION_COL = "asset_type"
 EQUIPMENT_COL = "equipment_id"
 SEVERITY_COL = "severity"
 OUTLIER_LABEL = "isole_atypique"
+# Incidents dont le rapport ne dit pas la cause : groupe à part, jamais clusterisé ni diagnostiqué
+UNKNOWN_CAUSE_LABEL = "cause_non_precisee"
+NOISE_LABELS = (OUTLIER_LABEL, UNKNOWN_CAUSE_LABEL)
 RANDOM_STATE = 42
 
 # Profil de concentration (où agir) : lift vs part attendue + test binomial
@@ -76,3 +79,16 @@ PRECURSOR_N_PERMUTATIONS = 10000  # plancher p = 1e-4 : à 1000, le BH sur ~200 
 PRECURSOR_FDR = 0.05
 PRECURSOR_MIN_HITS = 5
 PRECURSOR_MIN_EQUIPMENTS = 3
+
+# Extraction de la cause par incident (le clustering porte sur la cause, pas sur le rapport entier)
+CAUSE_COL = "cause_racine"
+CAUSE_QUOTE_COL = "indice"
+CONSEQUENCE_COL = "consequence"
+CAUSE_UNKNOWN_TEXT = "cause non précisée dans le rapport"
+# Un extrait cité est accepté si sa plus longue portion commune avec le rapport en couvre cette part
+QUOTE_MIN_MATCH = 0.8
+EXTRACTION_WORKERS = 4
+
+# Fonctionnement nominal : proposé par le diagnostic, accepté seulement si au moins cette part des
+# incidents du cluster est au niveau de sévérité le plus bas
+NOMINAL_MIN_MILD_SHARE = 0.8

@@ -20,14 +20,15 @@ DATA = ROOT / "data" / "incidents_full.csv"
 EXPECTED_COLUMNS = {
     "incidents_segmented": ["incident_id", "fine_cluster_id", "merged_cluster_id", "cluster_id",
                             "problem_title", "common_cause", "cluster_criticality_tier",
-                            "assignment_source"],
+                            "assignment_source", "cause_racine", "indice", "consequence", "cause_known"],
     "clusters_fine": ["fine_cluster_id", "partition", "merged_cluster_id", "size", "fine_title",
                       "failure_mode", "keywords"],
     "clusters_merged": ["merged_cluster_id", "partition", "fine_cluster_ids", "criticality_rank",
                         "criticality_tier", "frequency", "mean_cost_eur", "total_cost_eur",
                         "mean_downtime_hours", "total_downtime_hours", "problem_title",
-                        "problem_description", "common_cause", "system_impact", "prevented_outcomes",
-                        "recommendations", "early_warning_rules"],
+                        "problem_description", "common_cause", "common_cause_quotes",
+                        "common_cause_source", "system_impact", "prevented_outcomes",
+                        "recommendations", "early_warning_rules", "nominal", "nominal_reason"],
     "concentration": ["merged_cluster_id", "dimension", "value", "observed", "expected", "lift",
                       "p_value", "q_value", "significant"],
     "precursor_pairs": ["kind", "partition", "scope_cluster", "antecedent", "consequent",
@@ -60,6 +61,12 @@ class FakeLLM:
     def __call__(self, system_prompt, user_prompt, cache_tag="general", **kw):
         self.calls[cache_tag] = self.calls.get(cache_tag, 0) + 1
         h = zlib.crc32(user_prompt.encode()) % 100000
+        if cache_tag == "cause_extraction":
+            words = user_prompt.removeprefix("Description : ").split()
+            if h % 10 == 0:  # une partie des rapports sans cause écrite
+                return {"cause_racine": "cause non précisée dans le rapport", "cause_type": "inconnue", "indice": ""}
+            return {"cause_racine": " ".join(words[:8]), "cause_type": "explicite", "indice": " ".join(words[:12]),
+                    "consequence": "arrêt de production", "composant_brut": ""}
         if cache_tag == "fine_label":
             return {"fine_title": f"Défaut type {h}", "failure_mode": f"Mode de défaillance {h}"}
         if cache_tag == "outlier_reassignment":
@@ -81,9 +88,12 @@ class FakeLLM:
                     "single_specific_remediation": True, "reason": "ok"}
         if cache_tag == "precursor_check":
             return {"plausible": True, "mechanism": "dégradation progressive", "monitoring_rule": "si 2 A en 30 j -> inspecter"}
-        if cache_tag == "diagnosis_v2":
+        if cache_tag == "nominal_check":
+            return {"protection_only": True, "defect_found": False, "reason": "test"}
+        if cache_tag == "diagnosis_v3":
             return {"problem_title": f"Diagnostic {h}", "problem_description": "desc", "common_cause": "cause",
                     "system_impact": "impact", "prevented_outcomes": ["arrêt machine"],
+                    "common_cause_quotes": ["citation inventée absente des rapports"],
                     "recommendations": [{"action": "Inspecter", "scope": "equipment", "targets": ["EQUIP-INVENTE"],
                                          "rationale": "r"}],
                     "early_warning_rules": [{"rule_id": "inventé", "rule": "x", "action": "y"}]}
@@ -145,15 +155,23 @@ def test_pipeline_smoke(sample_csv, tmp_path, monkeypatch, no_llm):
     assert len(seg) == n
     assert seg["fine_cluster_id"].notna().all() and seg["merged_cluster_id"].notna().all()
     assert (seg["cluster_id"] == seg["merged_cluster_id"]).all()
-    assert set(seg["assignment_source"]) <= {"dense_cluster", "llm_reassigned", "unclassified_outlier"}
+    assert set(seg["assignment_source"]) <= {"dense_cluster", "llm_reassigned", "unclassified_outlier", "cause_unknown"}
+    # Les rapports sans cause forment un groupe à part ; les autres sont clusterisés sur la cause
+    unknown = seg["cause_known"] == False  # noqa: E712
+    assert unknown.any() and (seg.loc[unknown, "merged_cluster_id"] == "cause_non_precisee").all()
+    assert (seg.loc[unknown, "assignment_source"] == "cause_unknown").all()
+    assert not seg.loc[~unknown, "merged_cluster_id"].eq("cause_non_precisee").any()
     merged = pd.read_csv(paths["clusters_merged"])
     assert set(seg["merged_cluster_id"]) == set(merged["merged_cluster_id"])
     for c in ("prevented_outcomes", "recommendations", "early_warning_rules", "fine_cluster_ids"):
         assert all(isinstance(json.loads(v), list) for v in merged[c])
-    # cibles inventées filtrées par la validation du diagnostic
+    # cibles inventées filtrées par la validation du diagnostic ; citation inventée : cause de l'extraction
+    diagnosed = merged[~merged["merged_cluster_id"].isin(["isole_atypique", "cause_non_precisee"])]
+    assert (diagnosed["common_cause_source"] == "extraction").all()
+    assert set(diagnosed["common_cause"]) <= set(seg["cause_racine"])
     assert all(t not in str(r) for r in merged["recommendations"] for t in ["EQUIP-INVENTE"])
     print("sources:", seg["assignment_source"].value_counts().to_dict(), "calls:", llm.calls,
           "evidence rows:", len(pd.read_csv(paths["precursor_evidence"])))
     assert llm.calls.get("outlier_reassignment", 0) > 0
     assert "isole_atypique" in set(seg["merged_cluster_id"])
-    assert llm.calls.get("fine_label", 0) > 0 and llm.calls.get("diagnosis_v2", 0) > 0
+    assert llm.calls.get("fine_label", 0) > 0 and llm.calls.get("diagnosis_v3", 0) > 0

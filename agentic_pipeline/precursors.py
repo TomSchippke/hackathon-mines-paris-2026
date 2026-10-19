@@ -17,7 +17,7 @@ from .config import (
     DATE_COL,
     EQUIPMENT_COL,
     ID_COL,
-    OUTLIER_LABEL,
+    NOISE_LABELS,
     PARTITION_COL,
     PRECURSOR_FDR,
     PRECURSOR_MIN_EQUIPMENTS,
@@ -76,7 +76,7 @@ def _prepare(
                       else np.full(len(df), _GLOBAL, dtype=object)),
         "orig_index": df.index.to_numpy(),
     })
-    work = work[work["label"].notna() & (work["label"] != OUTLIER_LABEL)]
+    work = work[work["label"].notna() & ~work["label"].isin(NOISE_LABELS)]
     work = work.dropna(subset=["date"])
     work["label"] = work["label"].astype(str)
     return work.sort_values(["partition", "equipment", "date"], kind="stable").reset_index(drop=True)
@@ -309,8 +309,8 @@ def mine_escalations(
         id_col=kwargs.get("id_col", ID_COL),
         partition_col=kwargs.get("partition_col", PARTITION_COL),
     )
-    valid = df[df[merged_col].notna() & (df[merged_col] != OUTLIER_LABEL)
-               & df[fine_col].notna() & (df[fine_col] != OUTLIER_LABEL)]
+    valid = df[df[merged_col].notna() & ~df[merged_col].isin(NOISE_LABELS)
+               & df[fine_col].notna() & ~df[fine_col].isin(NOISE_LABELS)]
     chunks = []
     for merged_id, sub in valid.groupby(merged_col, sort=True):
         if sub[fine_col].nunique() < 2:

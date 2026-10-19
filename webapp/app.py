@@ -38,6 +38,7 @@ EQUIPMENT_TIMELINE_PATH = Path("outputs/equipment/incidents_with_timeline.csv")
 TECHNICIAN_PERF_PATH = Path("outputs/equipment/technician_performance.csv")
 RUN_CMD = "python main.py --steps segmentation equipment"
 ISOLATED_ID = "isole_atypique"
+UNKNOWN_ID = "cause_non_precisee"  # incidents dont le rapport ne dit pas la cause (jamais clusterisés)
 WEAK = "à vérifier"  # niveau de preuve d'une concentration significative mais faible (concentration.csv)
 RECURRENCE_WINDOWS = [7, 15, 30, 60]  # fenêtres calculées par equipment_analysis
 
@@ -125,6 +126,9 @@ details.card > summary:focus-visible { outline: 2px solid var(--accent); outline
 .why { font-size: 13px; color: var(--muted); }
 .weak { font: 500 11px var(--font-data); text-transform: uppercase; letter-spacing: 0.04em; color: var(--moy);
   border: 1px solid currentColor; border-radius: 4px; padding: 0 5px; white-space: nowrap; }
+.quote { font-size: 13px; color: var(--muted); border-left: 2px solid var(--line); padding-left: 10px; font-style: italic; }
+.nominal { font: 600 11px var(--font-data); letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted);
+  border: 1.5px dashed currentColor; border-radius: 4px; padding: 1px 6px; white-space: nowrap; }
 .modes { display: flex; flex-wrap: wrap; gap: 8px; }
 .mode { border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; display: grid; gap: 2px; flex: 1 1 220px; min-width: 0; }
 .mode small { color: var(--muted); font-family: var(--font-data); font-size: 12px; }
@@ -301,7 +305,7 @@ def build_cards(summary_df: pd.DataFrame, incidents_df: pd.DataFrame, data: dict
     severity = pd.crosstab(incidents_df["merged_cluster_id"], incidents_df["severity"])
 
     cards = []
-    rows = summary_df[summary_df["merged_cluster_id"] != ISOLATED_ID].sort_values("criticality_rank")
+    rows = summary_df[~summary_df["merged_cluster_id"].isin([ISOLATED_ID, UNKNOWN_ID])].sort_values("criticality_rank")
     for _, r in rows.iterrows():
         cid = r["merged_cluster_id"]
         where = _rows(conc, conc["merged_cluster_id"] == cid if not conc.empty else None).sort_values("lift", ascending=False)
@@ -314,6 +318,10 @@ def build_cards(summary_df: pd.DataFrame, incidents_df: pd.DataFrame, data: dict
             "downtime": float(r["total_downtime_hours"]), "title": str(r["problem_title"]),
             "description": str(r.get("problem_description") or ""), "cause": str(r.get("common_cause") or ""),
             "impact": str(r.get("system_impact") or ""),
+            "quotes": [str(q) for q in parse_json_list(r.get("common_cause_quotes"))],
+            "cause_source": str(r.get("common_cause_source") or ""),
+            "nominal": str(r.get("nominal")).lower() == "true",
+            "nominal_reason": str(r.get("nominal_reason") or ""),
             "severity": {k: int(severity.loc[cid, k]) for k in SEVERITIES
                          if cid in severity.index and k in severity.columns and severity.loc[cid, k]},
             "outcomes": [str(o) for o in parse_json_list(r.get("prevented_outcomes"))],
@@ -376,19 +384,27 @@ def card_html(c: dict, max_cost: float) -> str:
     outcomes = ("<div class='sec'><h3>Défaillances évitées</h3><ul>"
                 + "".join(f"<li>{escape(o)}</li>" for o in c["outcomes"]) + "</ul></div>") if c["outcomes"] else ""
     tier = escape(c["tier"])
+    quotes = "".join(f"<p class='quote'>« {escape(q)} »</p>" for q in c["quotes"])
+    if c["cause_source"] == "extraction":
+        quotes += ("<p class='note'>Cause reprise des rapports : le diagnostic n'a pas cité d'extrait qui justifie "
+                   "sa propre formulation.</p>")
+    if c["nominal"]:
+        recs = ("<p class='note'>Fonctionnement normal : " + escape(c["nominal_reason"] or "le dispositif a réagi comme prévu")
+                + ". Aucune action corrective ; à surveiller seulement si la fréquence augmente.</p>")
+    badge = "<span class='nominal'>Fonctionnement normal</span>" if c["nominal"] else f"<span class='tier t-{tier}'>{tier}</span>"
     return f"""
 <details class="card">
   <summary>
     <span class="rank">#{c['rank']}</span>
     <div class="head">
-      <div class="title-row"><span class="tier t-{tier}">{tier}</span><span class="card-title">{escape(c['title'])}</span></div>
+      <div class="title-row">{badge}<span class="card-title">{escape(c['title'])}</span></div>
       <div class="meta"><span>{PART.get(c['partition'], escape(c['partition']))}</span><span><b>{c['n']}</b> incidents</span>
         <span><b>{eur(c['cost'])}</b></span><span>{num(c['downtime'])} h d'arrêt</span></div>
       <div class="bar" aria-hidden="true"><i class="b-{tier}" style="width:{100 * c['cost'] / max_cost:.1f}%"></i></div>
     </div>
   </summary>
   <div class="body">
-    <div class="sec"><h3>Problème et cause</h3><p>{escape(c['description'])}</p><p><b>Cause commune :</b> {escape(c['cause'])}</p>
+    <div class="sec"><h3>Problème et cause</h3><p>{escape(c['description'])}</p><p><b>Cause commune :</b> {escape(c['cause'])}</p>{quotes}
       {f"<p class='note'>Impact : {escape(c['impact'])}</p>" if c['impact'] else ""}
       {f"<p class='note'>Gravité : {sev}. Coût moyen {eur(c['mean_cost'])} par incident.</p>" if sev else ""}</div>
     {outcomes}
@@ -403,7 +419,7 @@ def card_html(c: dict, max_cost: float) -> str:
 # ---------------------------------------------------------------------------
 # Onglets
 # ---------------------------------------------------------------------------
-def tab_plan(cards: list[dict], n_isolated: int) -> None:
+def tab_plan(cards: list[dict], n_isolated: int, n_unknown: int) -> None:
     c1, c2 = st.columns([1, 1])
     with c1:
         part_f = st.segmented_control("Type d'installation", ["Tous", *PART.values()], default="Tous", key="ap_part")
@@ -418,12 +434,17 @@ def tab_plan(cards: list[dict], n_isolated: int) -> None:
             and (tier_f in (None, "Toutes") or c["tier"] == tier_f)
             and (not q or q in json.dumps([c["title"], c["description"], c["cause"], c["recs"], c["where"], c["modes"]],
                                           ensure_ascii=False).lower())]
-    cost = sum(c["cost"] for c in rows)
-    st.html(f"<span class='count'>{len(rows)} fiche{'s' if len(rows) > 1 else ''} · {eur(cost)} · "
-            f"{n_isolated} incidents isolés non classés</span>")
+    active, nominal = [c for c in rows if not c["nominal"]], [c for c in rows if c["nominal"]]
+    cost = sum(c["cost"] for c in active)
+    st.html(f"<span class='count'>{len(active)} fiche{'s' if len(active) > 1 else ''} · {eur(cost)} · "
+            f"{n_isolated} incidents isolés · {n_unknown} sans cause précisée dans le rapport</span>")
     max_cost = max((c["cost"] for c in cards), default=1.0) or 1.0
-    st.html("<div class='rp list'>" + ("".join(card_html(c, max_cost) for c in rows)
+    st.html("<div class='rp list'>" + ("".join(card_html(c, max_cost) for c in active)
                                        or "<p class='note'>Aucune fiche ne correspond à ces filtres.</p>") + "</div>")
+    if nominal:
+        section("Fonctionnement normal", f"{len(nominal)} groupe{'s' if len(nominal) > 1 else ''} où le dispositif a "
+                "réagi comme prévu (protection, mise en sécurité) : pas d'action corrective.")
+        st.html("<div class='rp list'>" + "".join(card_html(c, max_cost) for c in nominal) + "</div>")
 
 
 def tab_overview(summary_df: pd.DataFrame, incidents_df: pd.DataFrame) -> None:
@@ -698,7 +719,7 @@ def tab_equipment() -> None:
         })
 
 
-def tab_method(data: dict[str, pd.DataFrame], n_fine: int, n_isolated: int) -> None:
+def tab_method(data: dict[str, pd.DataFrame], n_fine: int, n_isolated: int, n_unknown: int, n_nominal: int) -> None:
     conc, pairs = data["concentration"], data["pairs"]
     n_conc = int(_bool_series(conc, "significant").sum()) if not conc.empty else 0
     n_weak = int((conc["evidence_level"] == WEAK).sum()) if "evidence_level" in conc else 0
@@ -711,9 +732,13 @@ def tab_method(data: dict[str, pd.DataFrame], n_fine: int, n_isolated: int) -> N
     st.html(f"""
 <div class="rp prose">
   <h2>Comment ces fiches sont construites</h2>
-  <p>Chaque rapport d'incident est converti en vecteur sémantique, puis regroupé par type d'installation
-  (photovoltaïque, éolien) avec HDBSCAN. La taille minimale des groupes est choisie automatiquement par le score DBCV,
-  ce qui donne {n_fine} modes de défaillance fins.</p>
+  <p>Un LLM lit d'abord chaque rapport, sans le site ni la gravité, et en extrait la cause racine avec un extrait
+  recopié mot pour mot. Le code vérifie que l'extrait figure dans le rapport ; sinon, ou si le rapport ne dit pas
+  pourquoi l'incident est arrivé, l'incident est classé « cause non précisée » ({n_unknown} incidents, hors fiches).</p>
+  <p>Ce sont ces causes, et non les rapports entiers, qui sont converties en vecteurs sémantiques puis regroupées
+  par type d'installation (photovoltaïque, éolien) avec HDBSCAN : la description des dégâts ne sépare plus une même
+  cause en plusieurs groupes selon sa gravité. La taille minimale des groupes est choisie automatiquement par le
+  score DBCV, ce qui donne {n_fine} causes fines.</p>
   <p>Un agent LLM fusionne ensuite les modes qui relèvent d'une même correction concrète. Une fusion qui dégrade
   fortement la cohérence des groupes doit être confirmée par un second appel critique nommant un seul composant et
   une seule action ; au-delà de 35 % de dégradation, elle est refusée d'office.</p>
@@ -721,6 +746,11 @@ def tab_method(data: dict[str, pd.DataFrame], n_fine: int, n_isolated: int) -> N
   part attendue ({n_conc} concentrations significatives au total, dont {n_weak} « à vérifier » : q entre 0,05 et
   0,10, soit une preuve faible à confirmer sur place). Les recommandations ne peuvent cibler que ces sites ou
   équipements.</p>
+  <p>La cause commune de chaque fiche doit être justifiée par un extrait des rapports, vérifié par le code ; à
+  défaut, c'est la cause extraite la plus représentative qui est affichée. Le diagnostic peut aussi qualifier un
+  groupe de fonctionnement normal (protection déclenchée comme prévu, sans dégât) ; ce n'est accepté que si au moins
+  80 % de ses incidents sont au niveau de gravité le plus bas ({n_nominal} groupe{'s' if n_nominal > 1 else ''}
+  concerné{'s' if n_nominal > 1 else ''}, listés à part sans recommandation).</p>
   <p>Les récidives d'un équipement sont comparées à ce que le hasard produirait : mêmes nombres d'incidents et même
   période d'activité, dates tirées uniformément (2 000 simulations, correction de Benjamini-Hochberg). Un technicien
   est comparé aux autres techniciens de son site, jamais à la flotte, car chaque site a ses propres machines et
@@ -737,6 +767,7 @@ def main() -> None:
     data = load_action_plan_data()
     cards = build_cards(summary_df, incidents_df, data)
     n_isolated = int(summary_df.loc[summary_df["merged_cluster_id"] == ISOLATED_ID, "frequency"].sum())
+    n_unknown = int(summary_df.loc[summary_df["merged_cluster_id"] == UNKNOWN_ID, "frequency"].sum())
 
     with st.sidebar:
         st.markdown("**Données**")
@@ -747,7 +778,7 @@ def main() -> None:
             st.rerun()
 
     total_cost = incidents_df["estimated_cost_eur"].sum()
-    crit_cost = sum(c["cost"] for c in cards if c["tier"] == "Critique")
+    crit_cost = sum(c["cost"] for c in cards if c["tier"] == "Critique" and not c["nominal"])
     dates = incidents_df["date"].dropna()
     period = f"{month(dates.min())} – {month(dates.max())} · " if len(dates) else ""
     st.html(f"""
@@ -757,14 +788,14 @@ def main() -> None:
   <p class="lede">Les incidents des centrales PV et des parcs éoliens regroupés par voie de remédiation : une fiche par
   correction à mener, classée par coût cumulé, avec les sites et équipements où agir en priorité.</p>
   {figures([(num(len(incidents_df)), "incidents analysés"), (keur(total_cost), "coût total estimé"),
-            (num(len(cards)), "voies de remédiation"),
+            (num(sum(not c["nominal"] for c in cards)), "voies de remédiation"),
             (f"{num(100 * crit_cost / total_cost) if total_cost else 0} %", "du coût dans les fiches critiques")])}
 </header>""")
 
     t_plan, t_overview, t_incidents, t_equipment, t_method = st.tabs(
         ["Plan d'action", "Vue d'ensemble", "Incidents", "Équipements", "Méthode"])
     with t_plan:
-        tab_plan(cards, n_isolated)
+        tab_plan(cards, n_isolated, n_unknown)
     with t_overview:
         tab_overview(summary_df, incidents_df)
     with t_incidents:
@@ -772,7 +803,7 @@ def main() -> None:
     with t_equipment:
         tab_equipment()
     with t_method:
-        tab_method(data, len(data["fine"]), n_isolated)
+        tab_method(data, len(data["fine"]), n_isolated, n_unknown, sum(c["nominal"] for c in cards))
 
     st.html("<p class='rp footer'>Généré à partir des sorties de la pipeline <code>agentic_pipeline</code> "
             "(clustering v2) et <code>equipment_analysis</code>.</p>")

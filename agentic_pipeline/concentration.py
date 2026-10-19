@@ -14,7 +14,7 @@ from agentic_pipeline.config import (
     CONCENTRATION_PERIOD,
     CONCENTRATION_STRONG_Q,
     DATE_COL,
-    OUTLIER_LABEL,
+    NOISE_LABELS,
     PARTITION_COL,
 )
 
@@ -71,7 +71,7 @@ def compute_concentration(
     « à vérifier » sinon.
     """
     columns = [*CONCENTRATION_COLS, "period"]
-    data = df[df[cluster_col].notna() & (df[cluster_col] != OUTLIER_LABEL)]
+    data = df[df[cluster_col].notna() & ~df[cluster_col].isin(NOISE_LABELS)]
 
     # Partition de chaque cluster : valeur majoritaire de ses incidents
     cluster_partition = data.groupby(cluster_col)[partition_col].agg(lambda s: s.mode().iloc[0])
