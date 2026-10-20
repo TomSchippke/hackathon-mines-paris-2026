@@ -200,8 +200,7 @@ def figures(items: list[tuple[str, str]]) -> str:
 
 
 def section(title: str, note: str = "") -> None:
-    st.html(f"<div class='rp section'><h2>{escape(title)}</h2>"
-            + (f"<p class='note'>{escape(note)}</p>" if note else "") + "</div>")
+    st.html(section_html(title, note))
 
 
 def chart(fig: go.Figure) -> None:
@@ -449,44 +448,78 @@ def _trend_sentence(t: dict) -> str:
     return head + f" ; nombre d'incidents {pct(inc)}, coût moyen par incident {pct(mean)}."
 
 
-def tab_summary(ov: dict) -> None:
+def section_html(title: str, note: str = "") -> str:
+    return (f"<div class='rp section'><h2>{escape(title)}</h2>"
+            + (f"<p class='note'>{escape(note)}</p>" if note else "") + "</div>")
+
+
+def render(blocks: list) -> None:
+    """Affiche une suite de blocs : texte HTML ou graphique Plotly (même suite que l'export HTML)."""
+    for b in blocks:
+        chart(b) if isinstance(b, go.Figure) else st.html(b)
+
+
+def fig_cost_by_year(years: list[dict]) -> go.Figure:
+    labels = [f"{y['year']}{' (partielle)' if y['partial'] else ''}" for y in years]
+    fig = go.Figure()
+    for part in sorted({p for y in years for p in y["by_partition"]}):
+        vals = [y["by_partition"].get(part, {}) for y in years]
+        fig.add_bar(x=labels, y=[v.get("cost", 0) for v in vals], name=PART.get(part, part),
+                    marker_color=PART_COLORS.get(part, MUTED), customdata=[v.get("incidents", 0) for v in vals],
+                    hovertemplate="%{y:,.0f} € · %{customdata} incidents<extra>" + PART.get(part, part) + "</extra>")
+    for label, y in zip(labels, years):
+        fig.add_annotation(x=label, y=y["cost"], text=f"<b>{keur(y['cost'])}</b> · {num(y['incidents'])} inc.",
+                           showarrow=False, yshift=12, font=dict(size=12, color=INK))
+    fig.update_layout(barmode="stack", height=340, title="Coût des incidents par année",
+                      xaxis=dict(type="category"), yaxis=dict(title="Coût (€)", tickformat="~s"), bargap=0.45)
+    return fig
+
+
+def fig_severity_shares(sev: dict[str, dict]) -> go.Figure:
+    fig = go.Figure()
+    for level in SEVERITIES:
+        s = sev.get(level)
+        if not s:
+            continue
+        fig.add_bar(y=["Part du coût", "Part des incidents"], x=[s["cost_share_pct"], s["incident_share_pct"]],
+                    orientation="h", name=level.capitalize(), marker_color=SEV_COLORS.get(level, MUTED),
+                    text=[f"{num(s['cost_share_pct'])} %", f"{num(s['incident_share_pct'])} %"],
+                    textposition="inside", insidetextanchor="middle", textfont=dict(color="#ffffff"),
+                    hovertemplate=f"{level} : %{{x:.1f}} %<extra></extra>")
+    fig.update_layout(barmode="stack", height=230, title="Gravité : part des incidents et part du coût",
+                      xaxis=dict(range=[0, 100], ticksuffix=" %"), margin=dict(t=80))
+    return fig
+
+
+def summary_blocks(ov: dict) -> list:
+    """Onglet Synthèse : tendance du coût, puis concentration du coût."""
+    blocks: list = []
     # --- 1. Tendance : le coût augmente-t-il ?
     t, years = ov.get("trend"), ov.get("years") or []
     if t:
         direction = "augmente" if (t["cost_change_pct"] or 0) > 0 else "baisse"
-        section(f"Le coût {direction} : {pct(t['cost_change_pct'])} entre {t['from_year']} et {t['to_year']}",
-                "Valeurs ramenées à 365 jours : une année incomplète est comparable aux autres." if t["annualized"] else "")
-        st.html(figures([
+        blocks.append(section_html(
+            f"Le coût {direction} : {pct(t['cost_change_pct'])} entre {t['from_year']} et {t['to_year']}",
+            "Valeurs ramenées à 365 jours : une année incomplète est comparable aux autres." if t["annualized"] else ""))
+        blocks.append(figures([
             (pct(t["cost_change_pct"]), f"coût total {t['to_year']} vs {t['from_year']}"),
             (pct(t["incidents_change_pct"]), "nombre d'incidents"),
             (pct(t["mean_cost_change_pct"]), "coût moyen par incident"),
             (pct(t["downtime_change_pct"]), "heures d'arrêt"),
         ]) + f"<div class='rp callout'><p>{_trend_sentence(t)}</p></div>")
     else:
-        section("Évolution du coût", "Une seule année de données : pas de tendance calculable.")
+        blocks.append(section_html("Évolution du coût", "Une seule année de données : pas de tendance calculable."))
     if years:
-        labels = [f"{y['year']}{' (partielle)' if y['partial'] else ''}" for y in years]
-        fig = go.Figure()
-        for part in sorted({p for y in years for p in y["by_partition"]}):
-            vals = [y["by_partition"].get(part, {}) for y in years]
-            fig.add_bar(x=labels, y=[v.get("cost", 0) for v in vals], name=PART.get(part, part),
-                        marker_color=PART_COLORS.get(part, MUTED), customdata=[v.get("incidents", 0) for v in vals],
-                        hovertemplate="%{y:,.0f} € · %{customdata} incidents<extra>" + PART.get(part, part) + "</extra>")
-        for label, y in zip(labels, years):
-            fig.add_annotation(x=label, y=y["cost"], text=f"<b>{keur(y['cost'])}</b> · {num(y['incidents'])} inc.",
-                               showarrow=False, yshift=12, font=dict(size=12, color=INK))
-        fig.update_layout(barmode="stack", height=340, title="Coût des incidents par année",
-                          xaxis=dict(type="category"), yaxis=dict(title="Coût (€)", tickformat="~s"), bargap=0.45)
-        chart(fig)
+        blocks.append(fig_cost_by_year(years))
 
     # --- 2. Concentration : où se fait le coût ?
     sev = {s["severity"]: s for s in ov.get("severity", [])}
     top_sev = sev.get(SEVERITIES[0])
     top_inc = ov.get("top_incidents") or {}
     parts = ov.get("partitions") or []
-    section("Peu de causes font l'essentiel du coût",
-            "Les fiches de fonctionnement normal et les incidents isolés ne sont pas des causes à traiter : "
-            "ils sont exclus du classement, mais comptés dans le coût total.")
+    blocks.append(section_html("Peu de causes font l'essentiel du coût",
+                               "Les fiches de fonctionnement normal et les incidents isolés ne sont pas des causes à "
+                               "traiter : ils sont exclus du classement, mais comptés dans le coût total."))
     items = []
     if top_sev:
         items.append((f"{num(top_sev['incident_share_pct'])} % → {num(top_sev['cost_share_pct'])} %",
@@ -499,22 +532,9 @@ def tab_summary(ov: dict) -> None:
             n = len(p["top_clusters"])
             items.append((f"{n} fiche{'s' if n > 1 else ''} → {num(p['top_cost_share_pct'])} %",
                           f"du coût {PART.get(p['partition'], p['partition']).lower()} (sur {p['n_clusters']})"))
-    st.html(figures(items))
-
+    blocks.append(figures(items))
     if sev:
-        fig = go.Figure()
-        for level in SEVERITIES:
-            s = sev.get(level)
-            if not s:
-                continue
-            fig.add_bar(y=["Part du coût", "Part des incidents"], x=[s["cost_share_pct"], s["incident_share_pct"]],
-                        orientation="h", name=level.capitalize(), marker_color=SEV_COLORS.get(level, MUTED),
-                        text=[f"{num(s['cost_share_pct'])} %", f"{num(s['incident_share_pct'])} %"],
-                        textposition="inside", insidetextanchor="middle", textfont=dict(color="#ffffff"),
-                        hovertemplate=f"{level} : %{{x:.1f}} %<extra></extra>")
-        fig.update_layout(barmode="stack", height=230, title="Gravité : part des incidents et part du coût",
-                          xaxis=dict(range=[0, 100], ticksuffix=" %"), margin=dict(t=80))
-        chart(fig)
+        blocks.append(fig_severity_shares(sev))
 
     rows = "".join(
         f"<tr><td>{escape(PART.get(p['partition'], p['partition']))}</td>"
@@ -524,11 +544,16 @@ def tab_summary(ov: dict) -> None:
     if rows:
         weights = " · ".join(f"{PART.get(p['partition'], p['partition'])} : {num(p['incident_share_pct'])} % des "
                              f"incidents, {num(p['cost_share_pct'])} % du coût" for p in parts)
-        st.html("<div class='rp section'><h3 class='eyebrow'>Fiches les plus coûteuses par type d'installation</h3>"
-                f"<p class='note'>{escape(weights)}</p></div>"
-                "<div class='rp tablebox'><table><tr><th>Type</th><th class='num'>Rang</th><th>Fiche</th>"
-                "<th class='num'>Incidents</th><th class='num'>Coût</th><th class='num'>Part du coût du type</th></tr>"
-                + rows + "</table></div>")
+        blocks.append("<div class='rp section'><h3 class='eyebrow'>Fiches les plus coûteuses par type d'installation</h3>"
+                      f"<p class='note'>{escape(weights)}</p></div>"
+                      "<div class='rp tablebox'><table><tr><th>Type</th><th class='num'>Rang</th><th>Fiche</th>"
+                      "<th class='num'>Incidents</th><th class='num'>Coût</th><th class='num'>Part du coût du type</th></tr>"
+                      + rows + "</table></div>")
+    return blocks
+
+
+def tab_summary(ov: dict) -> None:
+    render(summary_blocks(ov))
 
 
 def tab_plan(cards: list[dict], n_isolated: int) -> None:
@@ -559,16 +584,20 @@ def tab_plan(cards: list[dict], n_isolated: int) -> None:
         st.html("<div class='rp list'>" + "".join(card_html(c, max_cost) for c in nominal) + "</div>")
 
 
-def tab_overview(summary_df: pd.DataFrame, incidents_df: pd.DataFrame) -> None:
-    total_cost = incidents_df["estimated_cost_eur"].sum()
-    st.html(figures([
+PARETO_NOTE = ("Chaque barre est une fiche, classée par coût cumulé ; la courbe donne la part cumulée du coût total. "
+               "Le trait pointillé marque 80 %.")
+
+
+def overview_figures_html(summary_df: pd.DataFrame, incidents_df: pd.DataFrame) -> str:
+    return figures([
         (f"{num(incidents_df['downtime_hours'].sum())} h", "d'arrêt cumulé"),
         (eur(incidents_df["estimated_cost_eur"].mean()), "coût moyen par incident"),
         (num(len(summary_df)), "groupes (y compris isolés)"),
-    ]))
+    ])
 
-    section("Pareto des coûts", "Chaque barre est une fiche, classée par coût cumulé ; la courbe donne la part "
-                                "cumulée du coût total. Le trait pointillé marque 80 %.")
+
+def fig_pareto(summary_df: pd.DataFrame, incidents_df: pd.DataFrame) -> go.Figure:
+    total_cost = incidents_df["estimated_cost_eur"].sum()
     s = summary_df.sort_values("total_cost_eur", ascending=False).copy()
     s["cum_ratio"] = 100 * s["total_cost_eur"].cumsum() / total_cost
     s["label"] = [f"#{int(r)}" for r in s["criticality_rank"]]
@@ -584,31 +613,44 @@ def tab_overview(summary_df: pd.DataFrame, incidents_df: pd.DataFrame) -> None:
                       yaxis=dict(title="Coût (€)", tickformat="~s"),
                       yaxis2=dict(overlaying="y", side="right", range=[0, 105], tickvals=[0, 20, 40, 60, 80, 100],
                                   ticktext=[f"{v} %" for v in range(0, 101, 20)], showgrid=False))
-    chart(fig)
+    return fig
 
+
+def fig_frequency_cost(summary_df: pd.DataFrame) -> go.Figure:
+    fig = px.scatter(summary_df, x="frequency", y="mean_cost_eur", size="total_downtime_hours",
+                     color="criticality_tier", color_discrete_map=TIER_COLORS, category_orders={"criticality_tier": TIERS},
+                     hover_name="problem_title", size_max=34,
+                     hover_data={"frequency": True, "mean_cost_eur": ":,.0f", "total_cost_eur": ":,.0f",
+                                 "total_downtime_hours": ":,.0f", "criticality_tier": False},
+                     labels={"frequency": "Incidents", "mean_cost_eur": "Coût moyen (€)",
+                             "total_downtime_hours": "Arrêt (h)", "total_cost_eur": "Coût total (€)"})
+    fig.update_traces(marker=dict(line=dict(width=1, color="#ffffff"), opacity=0.9))
+    fig.update_layout(height=400, xaxis_type="log", yaxis=dict(type="log", tickformat="~s"))
+    return fig
+
+
+def fig_site_cost(incidents_df: pd.DataFrame) -> go.Figure:
+    site_cost = (incidents_df.groupby(["site", "asset_type"])["estimated_cost_eur"].sum()
+                 .reset_index().sort_values("estimated_cost_eur"))
+    site_cost["Type"] = site_cost["asset_type"].map(PART).fillna(site_cost["asset_type"])
+    fig = px.bar(site_cost, y="site", x="estimated_cost_eur", color="Type", orientation="h",
+                 color_discrete_map={PART[k]: v for k, v in PART_COLORS.items()},
+                 labels={"estimated_cost_eur": "Coût (€)", "site": ""})
+    fig.update_layout(height=400, xaxis_tickformat="~s", bargap=0.35)
+    return fig
+
+
+def tab_overview(summary_df: pd.DataFrame, incidents_df: pd.DataFrame) -> None:
+    st.html(overview_figures_html(summary_df, incidents_df))
+    section("Pareto des coûts", PARETO_NOTE)
+    chart(fig_pareto(summary_df, incidents_df))
     col1, col2 = st.columns([6, 5])
     with col1:
         section("Fréquence et coût moyen", "Taille des bulles : heures d'arrêt cumulées.")
-        fig = px.scatter(summary_df, x="frequency", y="mean_cost_eur", size="total_downtime_hours",
-                         color="criticality_tier", color_discrete_map=TIER_COLORS, category_orders={"criticality_tier": TIERS},
-                         hover_name="problem_title", size_max=34,
-                         hover_data={"frequency": True, "mean_cost_eur": ":,.0f", "total_cost_eur": ":,.0f",
-                                     "total_downtime_hours": ":,.0f", "criticality_tier": False},
-                         labels={"frequency": "Incidents", "mean_cost_eur": "Coût moyen (€)",
-                                 "total_downtime_hours": "Arrêt (h)", "total_cost_eur": "Coût total (€)"})
-        fig.update_traces(marker=dict(line=dict(width=1, color="#ffffff"), opacity=0.9))
-        fig.update_layout(height=400, xaxis_type="log", yaxis=dict(type="log", tickformat="~s"))
-        chart(fig)
+        chart(fig_frequency_cost(summary_df))
     with col2:
         section("Coût par site", "Coût cumulé des incidents de chaque site.")
-        site_cost = (incidents_df.groupby(["site", "asset_type"])["estimated_cost_eur"].sum()
-                     .reset_index().sort_values("estimated_cost_eur"))
-        site_cost["Type"] = site_cost["asset_type"].map(PART).fillna(site_cost["asset_type"])
-        fig = px.bar(site_cost, y="site", x="estimated_cost_eur", color="Type", orientation="h",
-                     color_discrete_map={PART[k]: v for k, v in PART_COLORS.items()},
-                     labels={"estimated_cost_eur": "Coût (€)", "site": ""})
-        fig.update_layout(height=400, xaxis_tickformat="~s", bargap=0.35)
-        chart(fig)
+        chart(fig_site_cost(incidents_df))
 
     section("Toutes les fiches")
     tier_filter = st.multiselect("Criticité", TIERS, default=["Critique", "Élevée"], key="ov_tier", placeholder="Toutes")
@@ -695,6 +737,41 @@ def tab_incidents(summary_df: pd.DataFrame, incidents_df: pd.DataFrame) -> None:
             f"<span>{num(inc['downtime_hours'], 1)} h d'arrêt</span></div><p>{escape(str(inc['text']))}</p></div>")
 
 
+BAD_ACTOR_NOTE = ("Score « bad actor » : coût cumulé (40 %), indisponibilité cumulée (30 %) et récidives au-delà du "
+                  "hasard sous 30 jours (30 %). Sans aucun équipement au-dessus du hasard, le score ne repose que sur "
+                  "le coût et l'indisponibilité.")
+
+
+def bad_actors_html(eq: pd.DataFrame, w: int, n: int = 20) -> str:
+    return ("<div class='rp tablebox'><table><tr><th>Équipement</th><th>Site</th><th class='num'>Incidents</th>"
+            "<th class='num'>Sévères</th><th class='num'>Coût</th><th class='num'>MTBF</th>"
+            f"<th class='num'>Récidives {w} j<br>obs. / hasard</th><th class='num'>Score</th>"
+            "<th>Problème le plus fréquent</th></tr>"
+            + "".join(f"<tr><td class='num' style='text-align:left'>{escape(str(e['equipment_id']))}</td>"
+                      f"<td style='white-space:nowrap'>{escape(str(e['site']))}</td><td class='num'>{int(e['total_incidents'])}</td>"
+                      f"<td class='num'>{int(e.get('severe_incidents', 0))}</td><td class='num'>{keur(e['total_cost_eur'])}</td>"
+                      f"<td class='num'>{num(e['mtbf_days'], 1)} j</td>"
+                      f"<td class='num'>{int(e[f'recurrences_{w}d'])} / {num(e[f'expected_recurrences_{w}d'])}"
+                      + (" <span class='weak'>au-dessus</span>" if e[f"recurrence_above_chance_{w}d"] else "") + "</td>"
+                      f"<td class='num'>{num(e['bad_actor_score'], 1)}</td><td>{escape(str(e.get('most_frequent_problem', '')))}</td></tr>"
+                      for _, e in eq.head(n).iterrows())
+            + "</table></div>")
+
+
+def fig_mtbf_cost(eq: pd.DataFrame, w: int) -> go.Figure:
+    fig = px.scatter(eq, x="mtbf_days", y="total_cost_eur", size="total_incidents", color="bad_actor_score",
+                     color_continuous_scale=RED_SCALE, hover_name="equipment_id",
+                     hover_data={"site": True, "total_incidents": True, f"recurrences_{w}d": True,
+                                 f"expected_recurrences_{w}d": ":.0f"},
+                     labels={"mtbf_days": "MTBF (jours)", "total_cost_eur": "Coût cumulé (€)",
+                             "bad_actor_score": "Score", "total_incidents": "Incidents",
+                             f"recurrences_{w}d": f"Récidives {w} j", f"expected_recurrences_{w}d": "Attendues au hasard"},
+                     title="MTBF et coût cumulé par équipement")
+    fig.update_traces(marker=dict(line=dict(width=1, color="#ffffff")))
+    fig.update_layout(height=400, yaxis_tickformat="~s", coloraxis_colorbar=dict(thickness=10, len=0.6))
+    return fig
+
+
 def tab_equipment() -> None:
     eq_df, tl_df, tech_df = load_equipment_data()
     eq_df = eq_df.sort_values("bad_actor_score", ascending=False)
@@ -733,35 +810,9 @@ def tab_equipment() -> None:
                 f"hasard sur sa période d'activité, aucun équipement ne rechute plus souvent sous {w} jours : les "
                 "rechutes rapides s'expliquent par la fréquence des pannes, pas par la qualité des réparations.</p></div>")
 
-    section("Équipements à surveiller", "Score « bad actor » : coût cumulé (40 %), indisponibilité cumulée (30 %) et "
-                                        "récidives au-delà du hasard sous 30 jours (30 %). Sans aucun équipement "
-                                        "au-dessus du hasard, le score ne repose que sur le coût et l'indisponibilité.")
-    top = eq.head(20)
-    st.html("<div class='rp tablebox'><table><tr><th>Équipement</th><th>Site</th><th class='num'>Incidents</th>"
-            "<th class='num'>Sévères</th><th class='num'>Coût</th><th class='num'>MTBF</th>"
-            f"<th class='num'>Récidives {w} j<br>obs. / hasard</th><th class='num'>Score</th>"
-            "<th>Problème le plus fréquent</th></tr>"
-            + "".join(f"<tr><td class='num' style='text-align:left'>{escape(str(e['equipment_id']))}</td>"
-                      f"<td style='white-space:nowrap'>{escape(str(e['site']))}</td><td class='num'>{int(e['total_incidents'])}</td>"
-                      f"<td class='num'>{int(e.get('severe_incidents', 0))}</td><td class='num'>{keur(e['total_cost_eur'])}</td>"
-                      f"<td class='num'>{num(e['mtbf_days'], 1)} j</td>"
-                      f"<td class='num'>{int(e[f'recurrences_{w}d'])} / {num(e[f'expected_recurrences_{w}d'])}"
-                      + (" <span class='weak'>au-dessus</span>" if e[f"recurrence_above_chance_{w}d"] else "") + "</td>"
-                      f"<td class='num'>{num(e['bad_actor_score'], 1)}</td><td>{escape(str(e.get('most_frequent_problem', '')))}</td></tr>"
-                      for _, e in top.iterrows())
-            + "</table></div>")
-
-    fig = px.scatter(eq, x="mtbf_days", y="total_cost_eur", size="total_incidents", color="bad_actor_score",
-                     color_continuous_scale=RED_SCALE, hover_name="equipment_id",
-                     hover_data={"site": True, "total_incidents": True, f"recurrences_{w}d": True,
-                                 f"expected_recurrences_{w}d": ":.0f"},
-                     labels={"mtbf_days": "MTBF (jours)", "total_cost_eur": "Coût cumulé (€)",
-                             "bad_actor_score": "Score", "total_incidents": "Incidents",
-                             f"recurrences_{w}d": f"Récidives {w} j", f"expected_recurrences_{w}d": "Attendues au hasard"},
-                     title="MTBF et coût cumulé par équipement")
-    fig.update_traces(marker=dict(line=dict(width=1, color="#ffffff")))
-    fig.update_layout(height=400, yaxis_tickformat="~s", coloraxis_colorbar=dict(thickness=10, len=0.6))
-    chart(fig)
+    section("Équipements à surveiller", BAD_ACTOR_NOTE)
+    st.html(bad_actors_html(eq, w))
+    chart(fig_mtbf_cost(eq, w))
 
     section("Chronologie d'un équipement")
     if eq.empty:
@@ -833,6 +884,11 @@ def tab_equipment() -> None:
 
 def tab_method(data: dict[str, pd.DataFrame], n_fine: int, n_isolated: int, n_nominal: int,
                per_equipment: float) -> None:
+    st.html(method_html(data, n_fine, n_isolated, n_nominal, per_equipment))
+
+
+def method_html(data: dict[str, pd.DataFrame], n_fine: int, n_isolated: int, n_nominal: int,
+                per_equipment: float) -> str:
     conc, pairs = data["concentration"], data["pairs"]
     n_conc = int(_bool_series(conc, "significant").sum()) if not conc.empty else 0
     n_weak = int((conc["evidence_level"] == WEAK).sum()) if "evidence_level" in conc else 0
@@ -842,7 +898,7 @@ def tab_method(data: dict[str, pd.DataFrame], n_fine: int, n_isolated: int, n_no
     precursors = (f"Aucun n'est significatif (meilleure valeur q : {num(min_q, 2)}). Avec {num(per_equipment)} incidents "
                   "en moyenne par équipement, un tel lien n'est pas détectable s'il est faible."
                   if n_sig == 0 else f"{n_sig} sont significatifs et apparaissent dans les fiches concernées.")
-    st.html(f"""
+    return f"""
 <div class="rp prose">
   <h2>Comment ces fiches sont construites</h2>
   <p>Le texte de chaque rapport d'incident (sa description seule : ni site, ni gravité, ni météo, ni coût) est
@@ -869,7 +925,32 @@ def tab_method(data: dict[str, pd.DataFrame], n_fine: int, n_isolated: int, n_no
   <div class="callout"><p><b>Signaux précurseurs.</b> {num(len(tested))} enchaînements « incident A puis incident B sur
   le même équipement » ont été testés contre 10 000 permutations aléatoires des historiques. {precursors}</p></div>
   <p>Les {n_isolated} incidents isolés ne ressemblent à aucun groupe et ne figurent dans aucune fiche.</p>
-</div>""")
+</div>"""
+
+
+def header_html(incidents_df: pd.DataFrame, cards: list[dict]) -> str:
+    total_cost = incidents_df["estimated_cost_eur"].sum()
+    crit_cost = sum(c["cost"] for c in cards if c["tier"] == "Critique" and not c["nominal"])
+    dates = incidents_df["date"].dropna()
+    period = f"{month(dates.min())} – {month(dates.max())} · " if len(dates) else ""
+    return f"""
+<header class="rp rp-header">
+  <span class="eyebrow">{period}{incidents_df['site'].nunique()} sites · {incidents_df['equipment_id'].nunique()} équipements</span>
+  <h1>Plan d'action fiabilité</h1>
+  <p class="lede">Les incidents des centrales PV et des parcs éoliens regroupés par voie de remédiation : une fiche par
+  correction à mener, classée par coût cumulé, avec les sites et équipements où agir en priorité.</p>
+  {figures([(num(len(incidents_df)), "incidents analysés"), (keur(total_cost), "coût total estimé"),
+            (num(sum(not c["nominal"] for c in cards)), "voies de remédiation"),
+            (f"{num(100 * crit_cost / total_cost) if total_cost else 0} %", "du coût dans les fiches critiques")])}
+</header>"""
+
+
+def method_args(summary_df: pd.DataFrame, incidents_df: pd.DataFrame, data: dict[str, pd.DataFrame],
+                cards: list[dict]) -> tuple:
+    """Arguments de method_html (partagés par l'application et l'export HTML)."""
+    n_isolated = int(summary_df.loc[summary_df["merged_cluster_id"] == ISOLATED_ID, "frequency"].sum())
+    return (data, len(data["fine"]), n_isolated, sum(c["nominal"] for c in cards),
+            len(incidents_df) / max(incidents_df["equipment_id"].nunique(), 1))
 
 
 def main() -> None:
@@ -887,20 +968,7 @@ def main() -> None:
             st.cache_data.clear()
             st.rerun()
 
-    total_cost = incidents_df["estimated_cost_eur"].sum()
-    crit_cost = sum(c["cost"] for c in cards if c["tier"] == "Critique" and not c["nominal"])
-    dates = incidents_df["date"].dropna()
-    period = f"{month(dates.min())} – {month(dates.max())} · " if len(dates) else ""
-    st.html(f"""
-<header class="rp rp-header">
-  <span class="eyebrow">{period}{incidents_df['site'].nunique()} sites · {incidents_df['equipment_id'].nunique()} équipements</span>
-  <h1>Plan d'action fiabilité</h1>
-  <p class="lede">Les incidents des centrales PV et des parcs éoliens regroupés par voie de remédiation : une fiche par
-  correction à mener, classée par coût cumulé, avec les sites et équipements où agir en priorité.</p>
-  {figures([(num(len(incidents_df)), "incidents analysés"), (keur(total_cost), "coût total estimé"),
-            (num(sum(not c["nominal"] for c in cards)), "voies de remédiation"),
-            (f"{num(100 * crit_cost / total_cost) if total_cost else 0} %", "du coût dans les fiches critiques")])}
-</header>""")
+    st.html(header_html(incidents_df, cards))
 
     t_summary, t_plan, t_overview, t_incidents, t_equipment, t_method = st.tabs(
         ["Synthèse", "Plan d'action", "Vue d'ensemble", "Incidents", "Équipements", "Méthode"])
@@ -915,8 +983,7 @@ def main() -> None:
     with t_equipment:
         tab_equipment()
     with t_method:
-        tab_method(data, len(data["fine"]), n_isolated, sum(c["nominal"] for c in cards),
-                   len(incidents_df) / max(incidents_df["equipment_id"].nunique(), 1))
+        tab_method(*method_args(summary_df, incidents_df, data, cards))
 
     st.html("<p class='rp footer'>Généré à partir des sorties de la pipeline <code>agentic_pipeline</code> "
             "(clustering v2) et <code>equipment_analysis</code>.</p>")

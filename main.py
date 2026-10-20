@@ -4,13 +4,14 @@
   2. topics        topic modeling BERTopic sur tous les incidents     -> outputs/topics/ (optionnel)
   3. segmentation  clustering agentique des incidents                 -> outputs/segmentation/
   4. equipment     analyse par équipement                             -> outputs/equipment/
-  5. webapp        application Streamlit de visualisation
+  5. report        rapport HTML autonome (le livrable)                -> outputs/rapport.html
+  6. webapp        application Streamlit de visualisation (optionnel, interactif)
 
 Chaque étape met ses résultats en cache dans outputs/cache/ : relancer ne refait que ce qui a
 changé (nouveaux PDF, nouveaux textes).
 
 Usage :
-    python main.py                        # pdf, segmentation, equipment (défaut)
+    python main.py                        # pdf, segmentation, equipment, report (défaut)
     python main.py --steps topics         # seulement le topic modeling (optionnel)
     python main.py --steps segmentation equipment webapp
     python main.py --steps topics --min-cluster-size 15
@@ -30,12 +31,12 @@ from topic_modeling.pipeline import run as run_topics
 from agentic_pipeline.pipeline import run_agentic_segmentation
 from equipment_analysis.pipeline import run_equipment_analysis
 
-STEPS = ["pdf", "topics", "segmentation", "equipment", "webapp"]
+STEPS = ["pdf", "topics", "segmentation", "equipment", "report", "webapp"]
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--steps", nargs="+", choices=STEPS, default=["pdf", "segmentation", "equipment"], help="étapes à lancer")
+    parser.add_argument("--steps", nargs="+", choices=STEPS, default=["pdf", "segmentation", "equipment", "report"], help="étapes à lancer")
     parser.add_argument("--csv", type=Path, default=pdf_config.DEFAULT_CSV, help="CSV des incidents")
     parser.add_argument("--out-dir", type=Path, default=Path("outputs"))
     parser.add_argument("--min-cluster-size", type=int, default=topic_config.MIN_CLUSTER_SIZE,
@@ -68,6 +69,9 @@ def main() -> None:
                 input_csv=incidents_file,
                 out_dir=args.out_dir / "equipment",
             )
+        elif step == "report":
+            from webapp.export_html import run as run_report
+            run_report(args.out_dir / "rapport.html")
         elif step == "webapp":
             import subprocess
             subprocess.run(["uv", "run", "streamlit", "run", "webapp/app.py"])
