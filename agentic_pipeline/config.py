@@ -81,3 +81,8 @@ QUOTE_MIN_MATCH = 0.8
 # Fonctionnement nominal : proposé par le diagnostic, accepté seulement si au moins cette part des
 # incidents du cluster est au niveau de sévérité le plus bas
 NOMINAL_MIN_MILD_SHARE = 0.8
+
+# Synthèse des coûts (première page du rapport) : fiches les plus coûteuses montrées par partition, et
+# part des incidents les plus chers dont on mesure le poids dans le coût total
+OVERVIEW_TOP_CLUSTERS = 3
+OVERVIEW_TOP_INCIDENT_SHARE = 0.05

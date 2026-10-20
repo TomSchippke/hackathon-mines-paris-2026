@@ -19,6 +19,7 @@ import pandas as pd
 from . import clustering, llm_client
 from .agent import reassign_outliers_batch
 from .concentration import compute_concentration
+from .cost_overview import compute_cost_overview
 from .config import (
     COST_COL,
     DATE_COL,
@@ -399,6 +400,7 @@ def run_agentic_segmentation(
         "precursor_pairs": out_dir / "precursor_pairs.csv",
         "precursor_evidence": out_dir / "precursor_evidence.csv",
         "fine_sweep": out_dir / "fine_sweep.csv",
+        "cost_overview": out_dir / "cost_overview.json",
     }
     seg.to_csv(paths["incidents_segmented"], index=False)
     fine_df.to_csv(paths["clusters_fine"], index=False)
@@ -409,6 +411,9 @@ def run_agentic_segmentation(
     pairs[PAIR_COLUMNS].to_csv(paths["precursor_pairs"], index=False)
     evidence[EVIDENCE_COLUMNS].to_csv(paths["precursor_evidence"], index=False)
     sweep_df.to_csv(paths["fine_sweep"], index=False)
+    paths["cost_overview"].write_text(
+        json.dumps(compute_cost_overview(df, merged_df), ensure_ascii=False, indent=2, default=_json_default),
+        encoding="utf-8")
     for p in paths.values():
         print(f"       ✓ {p}")
 

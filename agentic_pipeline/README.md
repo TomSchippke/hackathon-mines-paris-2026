@@ -120,6 +120,7 @@ Dossier `outputs/segmentation/` (schémas détaillés dans le [README racine](..
 | `precursor_pairs.csv` | paire × fenêtre | `kind` (`precursor`, `recurrence`, `escalation`), `antecedent`, `consequent`, `window_days`, `n_hits`, `n_equipments`, `lift`, `q_value`, `is_best_window`, `significant`, `plausible`, `mechanism`, `monitoring_rule` |
 | `precursor_evidence.csv` | incident conséquent × règle | `rule_id`, `consequent_incident_id`, `equipment_id`, `antecedent_incident_ids`, `antecedent_dates`, `window_days` |
 | `fine_sweep.csv` | partition × taille minimale | `min_cluster_size`, `n_clusters`, `outlier_rate`, `dbcv` |
+| `cost_overview.json` | parc (première page du rapport) | `years` (coût, incidents, arrêt par année et par partition ; année incomplète ramenée à 365 jours), `trend` (variation entre les deux dernières années), `severity` (part des incidents et part du coût par gravité), `top_incidents` (part du coût des 5 % d'incidents les plus chers), `partitions` (poids de chaque partition et ses 3 fiches les plus coûteuses, hors isolés et fonctionnement normal) |
 
 Cache : chaque appel LLM est mis en cache dans `outputs/cache/agent/<cache_tag>/`, sous un hash
 du prompt système et du prompt utilisateur.

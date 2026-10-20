@@ -33,6 +33,7 @@ CONCENTRATION_PATH = SEG_DIR / "concentration.csv"
 PRECURSOR_PAIRS_PATH = SEG_DIR / "precursor_pairs.csv"
 PRECURSOR_EVIDENCE_PATH = SEG_DIR / "precursor_evidence.csv"
 INCIDENTS_PATH = SEG_DIR / "incidents_segmented.csv"
+OVERVIEW_PATH = SEG_DIR / "cost_overview.json"
 EQUIPMENT_SUMMARY_PATH = Path("outputs/equipment/equipment_summary.csv")
 EQUIPMENT_TIMELINE_PATH = Path("outputs/equipment/incidents_with_timeline.csv")
 TECHNICIAN_PERF_PATH = Path("outputs/equipment/technician_performance.csv")
@@ -52,6 +53,7 @@ MONTHS = ["janv.", "févr.", "mars", "avr.", "mai", "juin", "juil.", "août", "s
 INK, MUTED, LINE, SUNKEN, ACCENT = "#18222a", "#5a6670", "#d6dde1", "#e9edef", "#1d6a85"
 TIER_COLORS = {"Critique": "#b8322a", "Élevée": "#c96a14", "Moyenne": "#9c7a10", "Faible": "#4f7560"}
 PART_COLORS = {"wind": ACCENT, "solar": "#c79a2e"}
+SEV_COLORS = {"sévère": TIER_COLORS["Critique"], "modérée": TIER_COLORS["Élevée"], "mineure": TIER_COLORS["Faible"]}
 
 CSS = """
 @import url("https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap");
@@ -183,6 +185,11 @@ def keur(v: float) -> str:
     return f"{num(v / 1000)} k€"
 
 
+def pct(v: float | None) -> str:
+    """Variation signée : « +38 % », « -5 % » ; « n/d » si non calculable."""
+    return "n/d" if v is None else f"{'+' if v > 0 else ''}{num(v)} %"
+
+
 def month(d: pd.Timestamp) -> str:
     return f"{MONTHS[d.month - 1]} {d.year}"
 
@@ -263,6 +270,15 @@ def load_action_plan_data() -> dict[str, pd.DataFrame]:
         except pd.errors.EmptyDataError:
             out[key] = pd.DataFrame()
     return out
+
+
+@st.cache_data
+def load_overview(summary_df: pd.DataFrame, incidents_df: pd.DataFrame) -> dict:
+    """Synthèse des coûts écrite par la pipeline ; recalculée à la volée si le fichier n'existe pas encore."""
+    if OVERVIEW_PATH.exists():
+        return json.loads(OVERVIEW_PATH.read_text(encoding="utf-8"))
+    from agentic_pipeline.cost_overview import compute_cost_overview
+    return compute_cost_overview(incidents_df, summary_df)
 
 
 @st.cache_data
@@ -418,6 +434,103 @@ def card_html(c: dict, max_cost: float) -> str:
 # ---------------------------------------------------------------------------
 # Onglets
 # ---------------------------------------------------------------------------
+def _trend_sentence(t: dict) -> str:
+    """Phrase de lecture de la tendance : le coût suit-il le nombre d'incidents ou leur coût unitaire ?"""
+    cost, inc, mean = t["cost_change_pct"], t["incidents_change_pct"], t["mean_cost_change_pct"]
+    head = (f"Le coût annuel passe de <b>{keur(t['cost_from'])}</b> en {t['from_year']} à <b>{keur(t['cost_to'])}</b> "
+            f"en {t['to_year']} ({pct(cost)})")
+    if cost is None or inc is None:
+        return head + "."
+    if cost > 0 and cost - inc >= 10:
+        return (head + f", alors que le nombre d'incidents n'évolue que de {pct(inc)} : les incidents deviennent "
+                f"<b>plus coûteux, pas plus nombreux</b> (coût moyen par incident {pct(mean)}).")
+    if cost > 0:
+        return head + f", porté par le nombre d'incidents ({pct(inc)}) plus que par leur coût unitaire ({pct(mean)})."
+    return head + f" ; nombre d'incidents {pct(inc)}, coût moyen par incident {pct(mean)}."
+
+
+def tab_summary(ov: dict) -> None:
+    # --- 1. Tendance : le coût augmente-t-il ?
+    t, years = ov.get("trend"), ov.get("years") or []
+    if t:
+        direction = "augmente" if (t["cost_change_pct"] or 0) > 0 else "baisse"
+        section(f"Le coût {direction} : {pct(t['cost_change_pct'])} entre {t['from_year']} et {t['to_year']}",
+                "Valeurs ramenées à 365 jours : une année incomplète est comparable aux autres." if t["annualized"] else "")
+        st.html(figures([
+            (pct(t["cost_change_pct"]), f"coût total {t['to_year']} vs {t['from_year']}"),
+            (pct(t["incidents_change_pct"]), "nombre d'incidents"),
+            (pct(t["mean_cost_change_pct"]), "coût moyen par incident"),
+            (pct(t["downtime_change_pct"]), "heures d'arrêt"),
+        ]) + f"<div class='rp callout'><p>{_trend_sentence(t)}</p></div>")
+    else:
+        section("Évolution du coût", "Une seule année de données : pas de tendance calculable.")
+    if years:
+        labels = [f"{y['year']}{' (partielle)' if y['partial'] else ''}" for y in years]
+        fig = go.Figure()
+        for part in sorted({p for y in years for p in y["by_partition"]}):
+            vals = [y["by_partition"].get(part, {}) for y in years]
+            fig.add_bar(x=labels, y=[v.get("cost", 0) for v in vals], name=PART.get(part, part),
+                        marker_color=PART_COLORS.get(part, MUTED), customdata=[v.get("incidents", 0) for v in vals],
+                        hovertemplate="%{y:,.0f} € · %{customdata} incidents<extra>" + PART.get(part, part) + "</extra>")
+        for label, y in zip(labels, years):
+            fig.add_annotation(x=label, y=y["cost"], text=f"<b>{keur(y['cost'])}</b> · {num(y['incidents'])} inc.",
+                               showarrow=False, yshift=12, font=dict(size=12, color=INK))
+        fig.update_layout(barmode="stack", height=340, title="Coût des incidents par année",
+                          xaxis=dict(type="category"), yaxis=dict(title="Coût (€)", tickformat="~s"), bargap=0.45)
+        chart(fig)
+
+    # --- 2. Concentration : où se fait le coût ?
+    sev = {s["severity"]: s for s in ov.get("severity", [])}
+    top_sev = sev.get(SEVERITIES[0])
+    top_inc = ov.get("top_incidents") or {}
+    parts = ov.get("partitions") or []
+    section("Peu de causes font l'essentiel du coût",
+            "Les fiches de fonctionnement normal et les incidents isolés ne sont pas des causes à traiter : "
+            "ils sont exclus du classement, mais comptés dans le coût total.")
+    items = []
+    if top_sev:
+        items.append((f"{num(top_sev['incident_share_pct'])} % → {num(top_sev['cost_share_pct'])} %",
+                      f"incidents {top_sev['severity']}s → part du coût"))
+    if top_inc:
+        items.append((f"{num(top_inc['incident_share_pct'])} % → {num(top_inc['cost_share_pct'])} %",
+                      f"incidents les plus chers ({num(top_inc['incidents'])}) → part du coût"))
+    for p in parts:
+        if p["top_clusters"]:
+            n = len(p["top_clusters"])
+            items.append((f"{n} fiche{'s' if n > 1 else ''} → {num(p['top_cost_share_pct'])} %",
+                          f"du coût {PART.get(p['partition'], p['partition']).lower()} (sur {p['n_clusters']})"))
+    st.html(figures(items))
+
+    if sev:
+        fig = go.Figure()
+        for level in SEVERITIES:
+            s = sev.get(level)
+            if not s:
+                continue
+            fig.add_bar(y=["Part du coût", "Part des incidents"], x=[s["cost_share_pct"], s["incident_share_pct"]],
+                        orientation="h", name=level.capitalize(), marker_color=SEV_COLORS.get(level, MUTED),
+                        text=[f"{num(s['cost_share_pct'])} %", f"{num(s['incident_share_pct'])} %"],
+                        textposition="inside", insidetextanchor="middle", textfont=dict(color="#ffffff"),
+                        hovertemplate=f"{level} : %{{x:.1f}} %<extra></extra>")
+        fig.update_layout(barmode="stack", height=230, title="Gravité : part des incidents et part du coût",
+                          xaxis=dict(range=[0, 100], ticksuffix=" %"), margin=dict(t=80))
+        chart(fig)
+
+    rows = "".join(
+        f"<tr><td>{escape(PART.get(p['partition'], p['partition']))}</td>"
+        f"<td class='num'>#{i}</td><td>{escape(c['problem_title'])}</td><td class='num'>{num(c['incidents'])}</td>"
+        f"<td class='num'>{keur(c['cost'])}</td><td class='num'>{num(c['cost_share_pct'])} %</td></tr>"
+        for p in parts for i, c in enumerate(p["top_clusters"], 1))
+    if rows:
+        weights = " · ".join(f"{PART.get(p['partition'], p['partition'])} : {num(p['incident_share_pct'])} % des "
+                             f"incidents, {num(p['cost_share_pct'])} % du coût" for p in parts)
+        st.html("<div class='rp section'><h3 class='eyebrow'>Fiches les plus coûteuses par type d'installation</h3>"
+                f"<p class='note'>{escape(weights)}</p></div>"
+                "<div class='rp tablebox'><table><tr><th>Type</th><th class='num'>Rang</th><th>Fiche</th>"
+                "<th class='num'>Incidents</th><th class='num'>Coût</th><th class='num'>Part du coût du type</th></tr>"
+                + rows + "</table></div>")
+
+
 def tab_plan(cards: list[dict], n_isolated: int) -> None:
     c1, c2 = st.columns([1, 1])
     with c1:
@@ -789,8 +902,10 @@ def main() -> None:
             (f"{num(100 * crit_cost / total_cost) if total_cost else 0} %", "du coût dans les fiches critiques")])}
 </header>""")
 
-    t_plan, t_overview, t_incidents, t_equipment, t_method = st.tabs(
-        ["Plan d'action", "Vue d'ensemble", "Incidents", "Équipements", "Méthode"])
+    t_summary, t_plan, t_overview, t_incidents, t_equipment, t_method = st.tabs(
+        ["Synthèse", "Plan d'action", "Vue d'ensemble", "Incidents", "Équipements", "Méthode"])
+    with t_summary:
+        tab_summary(load_overview(summary_df, incidents_df))
     with t_plan:
         tab_plan(cards, n_isolated)
     with t_overview:

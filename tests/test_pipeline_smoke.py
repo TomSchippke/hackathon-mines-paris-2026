@@ -144,6 +144,9 @@ def test_pipeline_smoke(sample_csv, tmp_path, monkeypatch, no_llm):
     assert not (out / "clusters_summary.csv").exists()
     log = json.loads(paths["merge_log"].read_text(encoding="utf-8"))
     assert isinstance(log, list)
+    overview = json.loads(paths["cost_overview"].read_text(encoding="utf-8"))
+    assert overview["incidents"] == n and overview["years"] and len(overview["severity"]) == 3
+    assert {p["partition"] for p in overview["partitions"]} == {"solar", "wind"}
 
     seg = pd.read_csv(paths["incidents_segmented"])
     assert len(seg) == n
