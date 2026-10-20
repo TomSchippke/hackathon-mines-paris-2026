@@ -18,20 +18,24 @@ MAX_TEXTS_PER_FINE = 2
 MAX_TEXTS_TOTAL = 8
 MAX_TEXT_CHARS = 600
 MAX_CAUSE_QUOTES = 3
+MAX_RETRY_TEXTS = 30
+MAX_CRITIC_TEXTS = 6
 VALID_SCOPES = ("fleet", "site", "equipment")
+FALLBACK_ACTION = "Aucune action spécifique identifiée : inspecter pour établir la cause."
 
 SYSTEM_DIAGNOSIS_PROMPT_V2 = """Tu es un expert en fiabilité industrielle (maintenance, retour d'expérience).
 Le cluster analysé représente UNE voie de remédiation : un ensemble de défaillances qu'une même action corrective permet d'éviter.
 
-Ta mission : produire le diagnostic final de ce cluster à partir des données fournies (clusters fins membres avec des exemples de rapports, remédiation partagée, concentrations statistiquement significatives, règles précurseurs, impact).
+Ta mission : produire le diagnostic final de ce cluster à partir des données fournies (clusters fins membres avec des exemples de rapports, remédiation partagée, concentrations statistiquement significatives, séries en escalade, règles précurseurs, impact).
 
 Règles strictes :
 - Énumère chaque défaillance évitée (prevented_outcomes), une phrase courte par résultat.
-- Une cible "equipment" doit être un équipement listé, une cible "site" un site listé ; les périodes ne sont jamais des cibles (citables dans la justification).
-- Les recommandations doivent être spécifiques et actionnables. Utilise scope "equipment" ou "site" UNIQUEMENT pour des cibles listées dans la section « Concentrations » ; sinon scope "fleet" avec targets vide.
+- Une cible "equipment" doit être un équipement listé dans la section « Concentrations » ou dans la section « Séries en escalade », une cible "site" un site listé dans « Concentrations » ; les périodes ne sont jamais des cibles (citables dans la justification).
+- Chaque recommandation décrit UNE action physique concrète sur UN composant ou sous-système précis, tirée de ce que montrent les rapports. Utilise scope "equipment" ou "site" UNIQUEMENT pour des cibles listées ; sinon scope "fleet" avec targets vide.
+- Une série en escalade est la même famille de défaillance qui s'aggrave sur la même machine : un équipement en escalade appelle une action ciblée sur cet équipement.
 - Les règles d'alerte précoce (early_warning_rules) ne peuvent utiliser QUE des rule_id fournis dans la section « Règles précurseurs ».
 - S'il n'y a aucune concentration ou aucun précurseur, dis-le explicitement (liste vide) au lieu d'inventer.
-- La cause commune doit être celle que disent les rapports : justifie-la par 1 à 3 citations RECOPIÉES MOT POUR MOT dans les exemples de rapports fournis. Elles seront vérifiées dans les rapports du cluster ; une cause commune sans citation vérifiée est signalée comme non justifiée.
+- La cause commune doit être celle que disent les rapports : justifie-la par 1 à 3 citations RECOPIÉES MOT POUR MOT dans les exemples de rapports fournis. Elles seront vérifiées dans les rapports du cluster ; une cause commune sans citation vérifiée est signalée comme déduite, non établie.
 
 Format de réponse : un objet JSON STRICT avec les clés :
 - "problem_title": titre court (string)
@@ -53,7 +57,47 @@ a été constaté sur l'équipement, même mineur, sans dommage visible ou déco
 sécurité s'est déclenché (arrêt, coupure) en réaction à une condition extérieure identifiée, et que ce \
 déclenchement est la seule conséquence avant une reprise normale ; false sinon (simple alerte ou \
 surveillance, déclenchement sans cause extérieure, dégât, panne).
-- "reason" : une phrase qui justifie tes deux réponses."""
+- "external_condition" : la condition extérieure identifiée qui a provoqué le déclenchement, en quelques \
+mots ; chaîne vide si les rapports n'en mentionnent aucune.
+- "external_condition_quote" : le passage d'un rapport qui mentionne cette condition, RECOPIÉ MOT POUR \
+MOT ; chaîne vide si aucun passage ne la mentionne. Il sera vérifié dans les rapports.
+- "reason" : une phrase qui justifie tes réponses."""
+
+
+# Relance de la cause commune : citations sur un échantillon plus large de rapports
+SYSTEM_CAUSE_RETRY_PROMPT = """Tu es ingénieur fiabilité. On te donne les modes de défaillance et des rapports \
+d'incidents d'un même groupe, ainsi qu'une cause commune proposée qui n'a pas pu être justifiée par une \
+citation. Réponds en JSON :
+- "common_cause" : la cause commune telle que la disent les rapports ; corrige la cause proposée si les \
+rapports disent autre chose. Si aucun passage ne l'établit, donne la cause la plus probable déduite des \
+modes de défaillance.
+- "quotes" : 1 à 3 passages des rapports, RECOPIÉS MOT POUR MOT, qui établissent cette cause ; liste vide \
+si aucun passage ne l'établit (cause déduite). Les passages seront vérifiés dans les rapports."""
+
+
+# Relecture des recommandations : écarte les actions génériques ou non étayées
+SYSTEM_RECOMMENDATION_CRITIC_PROMPT = (
+    "Tu es un relecteur critique en fiabilité industrielle. On te donne les recommandations "
+    "proposées pour un groupe d'incidents, numérotées, avec les modes de défaillance et des extraits "
+    "de rapports du groupe. Une recommandation n'est utile que si elle décrit UNE action physique "
+    "concrète sur UN composant ou sous-système précis. Par défaut, sois sévère.\n"
+    "Pour chaque recommandation, rends un verdict :\n"
+    "- \"keep\" : elle est déjà spécifique (une action concrète sur un composant ou sous-système "
+    "nommé) ;\n"
+    "- \"rewrite\" : elle est générique, mais les rapports présentés permettent d'en tirer une action "
+    "concrète sur un composant ou sous-système précis : réécris-la en restant strictement dans ce que "
+    "montrent les rapports ;\n"
+    "- \"drop\" : elle n'est pas récupérable ou n'est pas étayée par les rapports présentés.\n"
+    "Est générique notamment : programme de maintenance, inspection régulière, surveillance "
+    "renforcée, formation du personnel, contrôle systématique, revue des procédures...\n"
+    "Une action réécrite n'enchaîne pas des actions distinctes (« et », « ou », « / ») et ne repose "
+    "sur aucune hypothèse non visible dans les rapports. Tu ne juges que l'action : la portée et les "
+    "cibles ne changent pas.\n"
+    "Pour keep et rewrite, nomme le composant et l'action ; si tu ne peux pas nommer un seul "
+    "composant, choisis drop.\n"
+    'Réponds en JSON : {"recommendations": [{"index": 1, "verdict": "keep"|"rewrite"|"drop", '
+    '"component": "...", "action": "...", "reason": "..."}]}'
+)
 
 
 def make_rule_id(antecedent: Any, consequent: Any, window_days: Any) -> str:
@@ -84,11 +128,13 @@ def build_diagnosis_context(
     impact: dict,
     member_texts: list[str] | None = None,
     mild_share: float | None = None,
+    escalations: pd.DataFrame | None = None,
 ) -> dict:
     """Assemble le contexte (filtré) fourni au LLM pour un cluster fusionné.
 
     `member_texts` : rapports des incidents du cluster (jamais envoyés au LLM, servent à vérifier
-    les citations) ; `mild_share` : part des incidents au niveau de sévérité le plus bas.
+    les citations) ; `mild_share` : part des incidents au niveau de sévérité le plus bas ;
+    `escalations` : séries en escalade (colonnes `escalation.ESCALATION_COLUMNS`).
     """
     fines = []
     texts_total = 0
@@ -121,15 +167,13 @@ def build_diagnosis_context(
     rules: list[dict] = []
     if precursor_pairs is not None and len(precursor_pairs):
         p = precursor_pairs
-        mask = _truthy(p["significant"]) & _truthy(p["plausible"])
-        scope = p["scope_cluster"] if "scope_cluster" in p else pd.Series("", index=p.index)
-        into = (p["consequent"] == merged_id) | ((p["kind"] == "escalation") & (scope == merged_id))
-        # une escalade d'un autre cluster ne doit pas passer via consequent == merged_id
-        into &= ~((p["kind"] == "escalation") & (scope != merged_id))
+        mask = _truthy(p["significant"]) & _truthy(p["plausible"]) & (p["consequent"] == merged_id)
+        if "kind" in p:
+            mask &= p["kind"] != "recurrence"
         counts = {}
         if evidence is not None and len(evidence) and "rule_id" in evidence:
             counts = evidence["rule_id"].value_counts().to_dict()
-        for r in p[mask & into].to_dict("records"):
+        for r in p[mask].to_dict("records"):
             rid = make_rule_id(r["antecedent"], r["consequent"], r["window_days"])
             rules.append({
                 "rule_id": rid,
@@ -146,6 +190,17 @@ def build_diagnosis_context(
                 "n_evidence_incidents": int(counts.get(rid, 0)),
             })
 
+    esc_rows: list[dict] = []
+    if escalations is not None and len(escalations) and "merged_cluster_id" in escalations:
+        for r in escalations[escalations["merged_cluster_id"] == merged_id].to_dict("records"):
+            esc_rows.append({
+                "equipment_id": str(r.get("equipment_id")),
+                "n_incidents": _clean(r.get("n_incidents")),
+                "severity_sequence": _clean(r.get("severity_sequence")),
+                "dates": _clean(r.get("dates")),
+                "total_cost_eur": _clean(r.get("total_cost_eur")),
+            })
+
     merge = merge_log_entry or {}
     return {
         "merged_cluster_id": merged_id,
@@ -155,6 +210,7 @@ def build_diagnosis_context(
         "merge_justification": merge.get("justification", ""),
         "concentration": conc_rows,
         "precursor_rules": rules,
+        "escalations": esc_rows,
         "impact": impact or {},
         "member_texts": list(member_texts or []),
         "mild_share": mild_share,
@@ -190,11 +246,21 @@ def _build_user_prompt(ctx: dict) -> str:
                     lines.append(f"- {c['value']} (observé {c['observed']}, "
                                  f"attendu {c['expected']}, lift {c['lift']})")
     else:
-        lines.append("Aucune concentration significative : utiliser uniquement scope \"fleet\".")
+        lines.append("Aucune concentration significative.")
+    lines += ["", "## Séries en escalade (même famille de défaillance qui s'aggrave sur la même machine ; "
+                  "scope \"equipment\")"]
+    if ctx.get("escalations"):
+        for e in ctx["escalations"]:
+            lines.append(f"- {e['equipment_id']} : {e['n_incidents']} incidents, sévérités {e['severity_sequence']} "
+                         f"(dates {e['dates']}), coût total {e['total_cost_eur']} EUR")
+    else:
+        lines.append("Aucune série en escalade.")
+    if not ctx["concentration"] and not ctx.get("escalations"):
+        lines.append("Aucune cible listée : utiliser uniquement scope \"fleet\".")
     lines += ["", "## Règles précurseurs (plausibles, significatives)"]
     if ctx["precursor_rules"]:
         for r in ctx["precursor_rules"]:
-            lines.append(f"- rule_id : {r['rule_id']} | type : {r['kind']} | lift {r['lift']} | "
+            lines.append(f"- rule_id : {r['rule_id']} | lift {r['lift']} | "
                          f"{r['n_hits']} cas sur {r['n_equipments']} équipements | "
                          f"preuves : {r['n_evidence_incidents']} incidents | mécanisme : {r['mechanism']} | "
                          f"surveillance : {r['monitoring_rule']}")
@@ -224,7 +290,14 @@ def _defaults(ctx: dict) -> dict:
         "nominal": False,
         "nominal_proposed": False,
         "nominal_reason": "",
+        "nominal_external_condition": "",
+        "nominal_external_quote": "",
     }
+
+
+def _fallback_recommendation() -> dict:
+    return {"action": FALLBACK_ACTION, "component": "", "scope": "fleet", "targets": [], "target_reason": {},
+            "targets_to_verify": [], "rationale": "", "confirm_cause_first": False, "critic_verdict": "fallback"}
 
 
 def simplify(text: Any) -> str:
@@ -244,15 +317,43 @@ def quote_found(quote: Any, text: Any) -> bool:
     return m.size >= QUOTE_MIN_MATCH * len(q)
 
 
-def _check_cause(result: dict, ctx: dict, out: dict) -> None:
-    """Citations gardées si elles figurent dans un rapport du cluster ; sans citation vérifiée, la
-    cause commune est marquée non justifiée (`common_cause_source` = « non_citee »)."""
-    raw = result.get("common_cause_quotes")
+def _verified_quotes(raw: Any, texts: list[str]) -> list[str]:
+    """Citations (strings) retrouvées dans au moins un rapport du cluster, MAX_CAUSE_QUOTES au plus."""
     raw = raw if isinstance(raw, list) else []
-    texts = ctx.get("member_texts") or []
     quotes = [q.strip()[:500] for q in raw if isinstance(q, str) and q.strip()]
-    quotes = [q for q in quotes if any(quote_found(q, t) for t in texts)][:MAX_CAUSE_QUOTES]
-    out.update(common_cause_quotes=quotes, common_cause_source="citee" if quotes else "non_citee")
+    return [q for q in quotes if any(quote_found(q, t) for t in texts)][:MAX_CAUSE_QUOTES]
+
+
+def _failure_modes(ctx: dict) -> list[str]:
+    return [f"{f.get('fine_title', '')} : {f.get('failure_mode', '')}" for f in ctx.get("fine_clusters", [])]
+
+
+def _cause_retry_prompt(ctx: dict, cause: str) -> str:
+    texts = [str(t).strip()[:MAX_TEXT_CHARS] for t in (ctx.get("member_texts") or [])[:MAX_RETRY_TEXTS]]
+    lines = [f"Cause commune proposée : {cause}", "", "Modes de défaillance :"]
+    lines += [f"- {m}" for m in _failure_modes(ctx)]
+    lines += ["", "Rapports du groupe :"] + [f"- {t}" for t in texts]
+    return "\n".join(lines)
+
+
+def _check_cause(result: Any, ctx: dict, out: dict, llm: Callable) -> None:
+    """Cause commune justifiée par des citations retrouvées dans les rapports du cluster
+    (`common_cause_source` = « citee »). Sinon, une relance sur MAX_RETRY_TEXTS rapports ; si elle
+    n'apporte pas de citation vérifiée, la cause est marquée déduite (« inferee »)."""
+    texts = ctx.get("member_texts") or []
+    quotes = _verified_quotes(result.get("common_cause_quotes") if isinstance(result, dict) else None, texts)
+    if quotes:
+        out.update(common_cause_quotes=quotes, common_cause_source="citee")
+        return
+    try:
+        res = llm(system_prompt=SYSTEM_CAUSE_RETRY_PROMPT, user_prompt=_cause_retry_prompt(ctx, out["common_cause"]),
+                  cache_tag="cause_retry")
+    except Exception:
+        res = None
+    res = res if isinstance(res, dict) else {}
+    quotes = _verified_quotes(res.get("quotes"), texts)
+    out["common_cause"] = _str(res.get("common_cause"), out["common_cause"])
+    out.update(common_cause_quotes=quotes, common_cause_source="citee" if quotes else "inferee")
 
 
 def _nominal_prompt(ctx: dict) -> str:
@@ -261,20 +362,85 @@ def _nominal_prompt(ctx: dict) -> str:
 
 
 def _check_nominal(ctx: dict, out: dict, llm: Callable) -> None:
-    """Fonctionnement nominal : le LLM dit qu'aucun défaut n'a été constaté et que la conséquence est
-    seulement une protection déclenchée ; le code exige en plus que le cluster soit surtout au plus
-    bas niveau de sévérité. Un cluster nominal n'a pas de recommandation."""
+    """Fonctionnement nominal : le LLM dit qu'aucun défaut n'a été constaté, que la conséquence est
+    seulement une protection déclenchée et cite la condition extérieure ; le code exige que cette
+    citation figure dans un rapport du cluster, puis que le cluster soit surtout au plus bas niveau de
+    sévérité. Un cluster nominal n'a pas de recommandation."""
     try:
         res = llm(system_prompt=SYSTEM_NOMINAL_PROMPT, user_prompt=_nominal_prompt(ctx), cache_tag="nominal_check")
     except Exception:
         res = None
     res = res if isinstance(res, dict) else {}
-    out["nominal_proposed"] = res.get("protection_only") is True and res.get("defect_found") is False
+    condition = _str(res.get("external_condition"), "", 300)
+    quote = _str(res.get("external_condition_quote"), "", 500)
+    texts = ctx.get("member_texts") or []
+    quoted = bool(quote) and any(quote_found(quote, t) for t in texts)
+    out["nominal_external_condition"] = condition
+    out["nominal_external_quote"] = quote if quoted else ""
+    out["nominal_proposed"] = (res.get("protection_only") is True and res.get("defect_found") is False
+                               and bool(condition) and quoted)
     share = ctx.get("mild_share")
     out["nominal"] = out["nominal_proposed"] and share is not None and share >= NOMINAL_MIN_MILD_SHARE
     if out["nominal"]:
         out["nominal_reason"] = _str(res.get("reason"), "", 500)
         out["recommendations"] = []
+
+
+def _critic_prompt(ctx: dict, recs: list[dict]) -> str:
+    texts = [t for f in ctx.get("fine_clusters", []) for t in f.get("representative_texts") or []]
+    lines = ["Modes de défaillance du groupe :"] + [f"- {m}" for m in _failure_modes(ctx)]
+    lines += ["", "Extraits de rapports :"] + [f"- {t}" for t in texts[:MAX_CRITIC_TEXTS]]
+    lines += ["", "Recommandations :"]
+    for i, r in enumerate(recs, 1):
+        lines.append(f"{i}. {r['action']}" + (f" (justification : {r['rationale']})" if r["rationale"] else ""))
+    return "\n".join(lines)
+
+
+def _criticize(ctx: dict, out: dict, llm: Callable) -> None:
+    """Relecture des recommandations validées : keep / rewrite / drop. Le critique ne peut changer que
+    l'action et le composant ; portée et cibles restent celles validées par le code. Recommandation
+    non citée ou verdict invalide : écartée. Appel en échec : recommandations gardées, « non_verifie »."""
+    recs = out["recommendations"]
+    if not recs:
+        out["recommendations"] = [_fallback_recommendation()]
+        return
+    try:
+        res = llm(system_prompt=SYSTEM_RECOMMENDATION_CRITIC_PROMPT, user_prompt=_critic_prompt(ctx, recs),
+                  cache_tag="recommendation_critic")
+        verdicts = res.get("recommendations") if isinstance(res, dict) else None
+    except Exception:
+        verdicts = None
+    if not isinstance(verdicts, list):
+        for r in recs:
+            r.update(critic_verdict="non_verifie", component="")
+        return
+    seen: dict[int, dict] = {}
+    for v in verdicts:
+        if not isinstance(v, dict):
+            continue
+        idx = v.get("index")
+        if isinstance(idx, str) and idx.strip().isdigit():
+            idx = int(idx.strip())
+        elif isinstance(idx, float) and idx.is_integer():
+            idx = int(idx)
+        if isinstance(idx, bool) or not isinstance(idx, int) or not 1 <= idx <= len(recs) or idx in seen:
+            continue
+        seen[idx] = v
+    if not seen:  # liste sans aucun index exploitable (vide, base 0...) : réponse mal formée
+        for r in recs:
+            r.update(critic_verdict="non_verifie", component="")
+        return
+    kept = []
+    for i, r in enumerate(recs, 1):
+        v = seen.get(i, {})
+        verdict, component, action = v.get("verdict"), _str(v.get("component"), "", 300), _str(v.get("action"), "")
+        if verdict not in ("keep", "rewrite") or not component or not action:
+            continue
+        r.update(component=component, critic_verdict=verdict)
+        if verdict == "rewrite":
+            r["action"] = action
+        kept.append(r)
+    out["recommendations"] = kept or [_fallback_recommendation()]
 
 
 def _validate(result: Any, ctx: dict) -> dict:
@@ -289,14 +455,16 @@ def _validate(result: Any, ctx: dict) -> dict:
     if isinstance(po, list):
         out["prevented_outcomes"] = [s.strip()[:500] for s in po if isinstance(s, str) and s.strip()]
 
-    valid_by_scope = {"equipment": set(), "site": set()}
+    conc_by_scope = {"equipment": set(), "site": set()}
     weak_by_scope = {"equipment": set(), "site": set()}
     for c in ctx.get("concentration", []):
         dim = {"equipment_id": "equipment", "site": "site"}.get(c.get("dimension"))
         if dim and c.get("value") is not None:
-            valid_by_scope[dim].add(str(c["value"]))
+            conc_by_scope[dim].add(str(c["value"]))
             if c.get("evidence_level") == TO_VERIFY:
                 weak_by_scope[dim].add(str(c["value"]))
+    escalating = {str(e["equipment_id"]) for e in ctx.get("escalations", [])}
+    valid_by_scope = {"equipment": conc_by_scope["equipment"] | escalating, "site": conc_by_scope["site"]}
     recs = result.get("recommendations")
     if isinstance(recs, list):
         for r in recs:
@@ -306,18 +474,27 @@ def _validate(result: Any, ctx: dict) -> dict:
             raw = r.get("targets")
             raw = raw if isinstance(raw, list) else ([raw] if isinstance(raw, str) else [])
             allowed = valid_by_scope.get(scope, set())
-            targets = [t for t in raw if isinstance(t, str) and t in allowed]
+            targets = list(dict.fromkeys(t for t in raw if isinstance(t, str) and t in allowed))
             if scope == "fleet":
                 targets = []
             elif not targets:
                 scope = "fleet"
+            reason = {}
+            for t in targets:
+                in_conc = t in conc_by_scope.get(scope, set())
+                in_esc = scope == "equipment" and t in escalating
+                reason[t] = "both" if in_conc and in_esc else ("concentration" if in_conc else "escalation")
             out["recommendations"].append({
                 "action": r["action"].strip()[:2000],
+                "component": "",
                 "scope": scope,
                 "targets": targets,
-                # cibles dont la concentration n'a qu'une preuve faible : à confirmer sur place
-                "targets_to_verify": [t for t in targets if t in weak_by_scope.get(scope, set())],
+                "target_reason": reason,
+                # cibles soutenues seulement par une concentration à preuve faible (pas par une escalade) : à confirmer
+                "targets_to_verify": [t for t in targets if t in weak_by_scope.get(scope, set()) and reason[t] == "concentration"],
                 "rationale": _str(r.get("rationale"), ""),
+                "confirm_cause_first": False,
+                "critic_verdict": "",
             })
 
     valid_rules = {r["rule_id"] for r in ctx.get("precursor_rules", [])}
@@ -331,17 +508,26 @@ def _validate(result: Any, ctx: dict) -> dict:
                     "rule": _str(r.get("rule"), ""),
                     "action": _str(r.get("action"), ""),
                 })
-    _check_cause(result, ctx, out)
     return out
 
 
+def _rec_rank(r: dict) -> int:
+    """Escalade d'abord, puis les autres actions ciblées (site / équipement), puis la flotte."""
+    if any(v in ("escalation", "both") for v in r.get("target_reason", {}).values()):
+        return 0
+    return 1 if r.get("scope") != "fleet" else 2
+
+
 def diagnose_merged_cluster(context: dict, llm: Callable = call_llm_json) -> dict:
-    """Diagnostic final d'un cluster fusionné ; ne lève jamais d'exception."""
+    """Diagnostic final d'un cluster fusionné ; ne lève jamais d'exception.
+
+    Étapes : appel principal -> validation -> cause commune (citée, sinon relance, sinon déduite)
+    -> fonctionnement nominal -> critique des recommandations (clusters non nominaux) -> ordre."""
     try:
         result = llm(
             system_prompt=SYSTEM_DIAGNOSIS_PROMPT_V2,
             user_prompt=_build_user_prompt(context),
-            cache_tag="diagnosis_v3",
+            cache_tag="diagnosis_v4",
         )
     except Exception:
         result = None
@@ -349,5 +535,23 @@ def diagnose_merged_cluster(context: dict, llm: Callable = call_llm_json) -> dic
         out = _validate(result, context)
     except Exception:
         out = _defaults(context)
-    _check_nominal(context, out, llm)
+    try:
+        _check_cause(result, context, out, llm)
+    except Exception:
+        out.update(common_cause_quotes=[], common_cause_source="inferee")
+    try:
+        _check_nominal(context, out, llm)
+    except Exception:
+        out.update(nominal=False, nominal_proposed=False)
+    if not out["nominal"]:
+        try:
+            _criticize(context, out, llm)
+        except Exception:
+            for r in out["recommendations"]:
+                r.update(critic_verdict="non_verifie", component="")
+        # cause seulement déduite : la confirmer sur place avant toute action ciblée
+        inferred = out["common_cause_source"] == "inferee"
+        for r in out["recommendations"]:
+            r["confirm_cause_first"] = inferred and r["scope"] != "fleet"
+        out["recommendations"].sort(key=_rec_rank)
     return out

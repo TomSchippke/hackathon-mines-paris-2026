@@ -74,6 +74,23 @@ def test_dbcv_string_labels_match_int_labels():
     assert dbcv_score(X, mixed) == ints
 
 
+def test_dbcv_ignores_singleton_clusters():
+    # Un cluster d'un seul point compte comme du bruit : le DBCV des vrais clusters est conservé
+    X, y = make_blobs(300, centers=3, n_features=2, cluster_std=0.6, random_state=0)
+    X = np.vstack([X, [[40.0, 40.0], [-40.0, 40.0]]])
+    as_noise = np.r_[y, [-1, -1]]
+    as_singletons = np.array([f"P_F{k}" for k in y] + ["P_O0", "P_O1"], dtype=object)
+    ref = dbcv_score(X, as_noise)
+    assert ref > 0
+    assert dbcv_score(X, as_singletons) == ref
+    # Un singleton fusionné à un vrai cluster (taille >= 2) compte de nouveau
+    absorbed = as_singletons.copy()
+    absorbed[-2] = "P_F0"
+    assert dbcv_score(X, absorbed) != ref
+    # Seulement des singletons : moins de 2 clusters
+    assert dbcv_score(X[:3], np.array(["a", "b", "c"], dtype=object)) == -1.0
+
+
 import pytest
 
 

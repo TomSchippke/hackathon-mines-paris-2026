@@ -31,7 +31,7 @@ from .config import (
 )
 
 PAIR_COLUMNS = [
-    "kind", "partition", "scope_cluster", "antecedent", "consequent", "window_days",
+    "kind", "partition", "antecedent", "consequent", "window_days",
     "n_hits", "n_equipments", "n_consequent", "expected_hits", "lift", "p_value",
     "q_value", "is_best_window", "significant", "plausible", "mechanism", "monitoring_rule",
 ]
@@ -216,10 +216,10 @@ def _compute_rows(
 # Correction BH et mise en forme
 # ---------------------------------------------------------------------------
 
-def _finalize(rows: pd.DataFrame, kind: str, fdr: float) -> pd.DataFrame:
-    """Une correction BH par ``kind`` (recurrence vs precursor/escalation) sur les lignes testées."""
+def _finalize(rows: pd.DataFrame, fdr: float) -> pd.DataFrame:
+    """Une correction BH par ``kind`` (recurrence vs precursor) sur les lignes testées."""
     rows = rows.copy()
-    rows["kind"] = np.where(rows["antecedent"] == rows["consequent"], "recurrence", kind)
+    rows["kind"] = np.where(rows["antecedent"] == rows["consequent"], "recurrence", "precursor")
     rows["q_value"] = np.nan
     tested = rows["p_value"].notna().to_numpy()
     # un pool BH par kind : les récurrences ne diluent pas les tests de précurseurs
@@ -229,7 +229,7 @@ def _finalize(rows: pd.DataFrame, kind: str, fdr: float) -> pd.DataFrame:
             rows.loc[m, "q_value"] = _benjamini_hochberg(rows.loc[m, "p_value"].to_numpy())
     rows["is_best_window"] = False
     t = rows[tested].sort_values(["q_value", "window_days"], kind="stable")
-    best = t.drop_duplicates(["partition", "scope_cluster", "antecedent", "consequent"]).index
+    best = t.drop_duplicates(["partition", "antecedent", "consequent"]).index
     rows.loc[best, "is_best_window"] = True
     rows["significant"] = (
         rows["is_best_window"] & (rows["q_value"] <= fdr) & (rows["lift"] > 1)
@@ -258,8 +258,6 @@ def mine_precursors(
     severity_col: str = SEVERITY_COL,
     id_col: str = ID_COL,
     partition_col: str | None = PARTITION_COL,
-    kind: str = "precursor",
-    scope_cluster: str = "",
 ) -> pd.DataFrame:
     """Fouille les paires (antécédent -> conséquent) sur un même équipement.
 
@@ -267,43 +265,7 @@ def mine_precursors(
     """
     work = _prepare(df, label_col, equipment_col, date_col, severity_col, id_col, partition_col)
     rows = _compute_rows(work, windows, n_permutations, random_state, min_hits, min_equipments)
-    rows["scope_cluster"] = scope_cluster
-    return _finalize(rows, kind, fdr)
-
-
-def mine_escalations(
-    df: pd.DataFrame,
-    fine_col: str = "fine_cluster_id",
-    merged_col: str = "merged_cluster_id",
-    windows: Sequence[int] = PRECURSOR_WINDOWS,
-    n_permutations: int = PRECURSOR_N_PERMUTATIONS,
-    random_state: int = RANDOM_STATE,
-    min_hits: int = PRECURSOR_MIN_HITS,
-    min_equipments: int = PRECURSOR_MIN_EQUIPMENTS,
-    fdr: float = PRECURSOR_FDR,
-    equipment_col: str = EQUIPMENT_COL,
-    date_col: str = DATE_COL,
-    severity_col: str = SEVERITY_COL,
-    id_col: str = ID_COL,
-    partition_col: str | None = PARTITION_COL,
-) -> pd.DataFrame:
-    """Escalade fine au sein de chaque cluster fusionné ayant au moins 2 clusters fins.
-
-    Un seul appel, donc une seule correction BH sur l'ensemble des lignes testées.
-    """
-    valid = df[df[merged_col].notna() & (df[merged_col] != OUTLIER_LABEL)
-               & df[fine_col].notna() & (df[fine_col] != OUTLIER_LABEL)]
-    chunks = []
-    for merged_id, sub in valid.groupby(merged_col, sort=True):
-        if sub[fine_col].nunique() < 2:
-            continue
-        work = _prepare(sub, fine_col, equipment_col, date_col, severity_col, id_col, partition_col)
-        rows = _compute_rows(work, windows, n_permutations, random_state, min_hits, min_equipments)
-        rows["scope_cluster"] = str(merged_id)
-        chunks.append(rows)
-    rows = (pd.concat(chunks, ignore_index=True) if chunks
-            else pd.DataFrame(columns=[*_ROW_COLUMNS, "scope_cluster"]))
-    return _finalize(rows, "escalation", fdr)
+    return _finalize(rows, fdr)
 
 
 def extract_evidence(
@@ -315,12 +277,10 @@ def extract_evidence(
     severity_col: str = SEVERITY_COL,
     id_col: str = ID_COL,
     partition_col: str | None = PARTITION_COL,
-    merged_col: str = "merged_cluster_id",
 ) -> pd.DataFrame:
     """Incidents conséquents en hit pour chaque règle ``significant & plausible``.
 
-    Les lignes d'escalade sont restreintes aux incidents de leur ``scope_cluster``
-    (colonne ``merged_col``, si présente). Les récurrences sont ignorées.
+    Les récurrences sont ignorées.
     """
     if "significant" not in pairs.columns or pairs.empty:
         return pd.DataFrame(columns=EVIDENCE_COLUMNS)
@@ -333,15 +293,9 @@ def extract_evidence(
         return pd.DataFrame(columns=EVIDENCE_COLUMNS)
 
     work = _prepare(df, label_col, equipment_col, date_col, severity_col, id_col, partition_col)
-    if merged_col in df.columns:
-        work["scope"] = df.loc[work["orig_index"], merged_col].astype(str).to_numpy()
-    else:
-        work["scope"] = ""
     out = []
     for r in sel.itertuples(index=False):
         sub = work[work["partition"] == str(r.partition)]
-        if r.kind == "escalation" and str(r.scope_cluster) and merged_col in df.columns:
-            sub = sub[sub["scope"] == str(r.scope_cluster)]
         rule_id = f"{r.antecedent}->{r.consequent}@{int(r.window_days)}d"
         for _, g in sub.groupby("equipment", sort=True):
             ants = g[g["label"] == r.antecedent]

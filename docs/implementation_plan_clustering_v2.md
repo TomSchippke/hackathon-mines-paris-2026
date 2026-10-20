@@ -1,3 +1,15 @@
+> **Note (document historique).** Ce plan est la spécification v2 d'origine. Il n'est plus la référence : le
+> code actuel est décrit dans [`agentic_pipeline/README.md`](../agentic_pipeline/README.md). Depuis ce plan :
+> - l'application Streamlit (`webapp/`, `.streamlit/`) est supprimée ; un rapport HTML statique est à venir ;
+> - `agent.py` (reclassement LLM des isolés, décision D12) est supprimé : chaque isolé HDBSCAN devient un cluster
+>   fin singleton, étiqueté puis soumis à l'agent de fusion ; un singleton jamais fusionné devient `isole_atypique` ;
+> - l'« escalade » au niveau des clusters fins (décision D4, type `escalation`, `scope_cluster`) est remplacée par une
+>   veille d'escalade descriptive (`escalation.py`, `escalations.csv`) : séries équipement × cluster fusionné ;
+> - l'audit par technicien du module `equipment_analysis` est supprimé (récidives à fenêtre fixe aussi) ;
+> - le diagnostic ajoute un critique de recommandations, des cibles d'escalade, une cause commune citée ou inférée,
+>   et un fonctionnement nominal exigeant une condition extérieure citée ;
+> - la criticité classe par coût total (paliers Pareto 70 / 90 / 98 %).
+
 # Implementation plan — Clustering v2 (remediation clusters, concentration, precursors)
 
 Shared spec for the orchestrator and the sub-agents. **Read sections 1–3 before any task.**

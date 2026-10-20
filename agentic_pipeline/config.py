@@ -25,9 +25,6 @@ NGRAM_RANGE = (1, 2)
 # Nombre d'incidents représentatifs transmis à l'agent par cluster
 NUM_REPRESENTATIVE_DOCS = 4
 
-# Taille des lots pour l'agent de reclassement des outliers
-OUTLIER_BATCH_SIZE = 15
-
 # Stopwords français
 FRENCH_STOPWORDS = [
     "le", "la", "les", "un", "une", "des", "de", "du", "et", "en", "sur", "au", "aux", "pour",
@@ -81,3 +78,6 @@ QUOTE_MIN_MATCH = 0.8
 # Fonctionnement nominal : proposé par le diagnostic, accepté seulement si au moins cette part des
 # incidents du cluster est au niveau de sévérité le plus bas
 NOMINAL_MIN_MILD_SHARE = 0.8
+
+# Veille d'escalade : nombre minimal d'incidents d'une série (équipement x cluster fusionné)
+ESCALATION_MIN_INCIDENTS = 3

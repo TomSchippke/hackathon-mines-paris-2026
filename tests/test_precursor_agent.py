@@ -6,13 +6,13 @@ import pandas as pd
 
 from agentic_pipeline.precursor_agent import check_plausibility
 
-COLS = ["kind", "partition", "scope_cluster", "antecedent", "consequent", "window_days",
+COLS = ["kind", "partition", "antecedent", "consequent", "window_days",
         "n_hits", "n_equipments", "n_consequent", "expected_hits", "lift", "p_value",
         "q_value", "is_best_window", "significant", "plausible", "mechanism", "monitoring_rule"]
 
 
 def _row(kind="precursor", significant=True, a="P_M1", b="P_M2"):
-    return dict(kind=kind, partition="P", scope_cluster="", antecedent=a, consequent=b,
+    return dict(kind=kind, partition="P", antecedent=a, consequent=b,
                 window_days=30, n_hits=8, n_equipments=4, n_consequent=12, expected_hits=2.0,
                 lift=4.0, p_value=0.001, q_value=0.01, is_best_window=True,
                 significant=significant, plausible=False, mechanism="", monitoring_rule="")
@@ -77,13 +77,13 @@ def test_exception_continues(no_llm):
     assert bool(out.loc[1, "plausible"]) is True
 
 
-def test_only_significant_precursor_escalation(no_llm):
+def test_only_significant_precursor(no_llm):
     f = Fake({"plausible": True, "mechanism": "m", "monitoring_rule": "r"})
     rows = [_row(significant=False), _row(kind="recurrence", a="P_M1", b="P_M1"),
-            _row(kind="escalation"), _row(kind="precursor")]
+            _row(kind="precursor")]
     out = check_plausibility(_pairs(rows), CARDS, llm=f)
-    assert len(f.calls) == 2
-    assert out["plausible"].tolist() == [False, False, True, True]
+    assert len(f.calls) == 1
+    assert out["plausible"].tolist() == [False, False, True]
     assert out.loc[0, "mechanism"] == "" and out.loc[1, "monitoring_rule"] == ""
 
 

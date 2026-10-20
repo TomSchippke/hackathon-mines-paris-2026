@@ -1,10 +1,10 @@
-"""Reconstitution chronologique et calcul des récidives par équipement."""
+"""Reconstitution chronologique descriptive des incidents par équipement."""
 
 from __future__ import annotations
 
-from typing import Sequence
-
 import pandas as pd
+
+from agentic_pipeline.config import OUTLIER_LABEL
 
 from .config import (
     CLUSTER_COL,
@@ -14,20 +14,17 @@ from .config import (
     EQUIPMENT_COL,
     ID_COL,
     PROBLEM_COL,
-    RECURRENCE_WINDOWS,
     SEVERITY_COL,
-    TECHNICIAN_COL,
 )
 
 
-def compute_equipment_timeline(
-    df: pd.DataFrame,
-    windows: Sequence[int] = RECURRENCE_WINDOWS,
-) -> pd.DataFrame:
-    """Calcule la timeline ordonnée des incidents pour chaque équipement et marque les récidives.
-    
-    Retourne une copie enrichie du DataFrame avec des colonnes relatives aux délais
-    inter-pannes et aux interventions passées/futures.
+def compute_equipment_timeline(df: pd.DataFrame) -> pd.DataFrame:
+    """Calcule la timeline ordonnée des incidents pour chaque équipement.
+
+    Retourne une copie enrichie du DataFrame avec des colonnes descriptives relatives aux délais
+    inter-pannes et aux incidents précédent/suivant. Aucun indicateur de récidive : sur ces
+    données, l'écart médian entre deux incidents d'un équipement (21 jours) rend un taux de
+    récidive à fenêtre fixe indiscernable du taux de base.
     """
     df = df.copy()
 
@@ -64,9 +61,6 @@ def compute_equipment_timeline(
     if ID_COL in df.columns:
         df["prev_incident_id"] = grouped[ID_COL].shift(1)
         df["next_incident_id"] = grouped[ID_COL].shift(-1)
-    if TECHNICIAN_COL in df.columns:
-        df["prev_technician_id"] = grouped[TECHNICIAN_COL].shift(1)
-        df["next_technician_id"] = grouped[TECHNICIAN_COL].shift(-1)
     if SEVERITY_COL in df.columns:
         df["prev_severity"] = grouped[SEVERITY_COL].shift(1)
     if PROBLEM_COL in df.columns:
@@ -74,29 +68,12 @@ def compute_equipment_timeline(
     if CLUSTER_COL in df.columns:
         df["prev_cluster_id"] = grouped[CLUSTER_COL].shift(1)
 
-    # 4. Flags de récidive pour chaque fenêtre (ex: 7j, 15j, 30j, 60j)
-    for w in windows:
-        # L'incident actuel est-il survenu dans les N jours après le précédent ?
-        df[f"is_recurrence_{w}d"] = (
-            df["days_since_last_incident"].notna() & (df["days_since_last_incident"] <= w)
-        )
-        # L'intervention actuelle a-t-elle été suivie d'une récidive sous N jours ?
-        df[f"followed_by_recurrence_{w}d"] = (
-            df["days_until_next_incident"].notna() & (df["days_until_next_incident"] <= w)
-        )
-
-    # Récidive avec le même technicien
-    if TECHNICIAN_COL in df.columns:
-        df["same_technician_as_prev"] = (
-            df["prev_technician_id"].notna()
-            & (df[TECHNICIAN_COL] == df["prev_technician_id"])
-        )
-
-    # Récidive sur le même cluster/cause si disponible
+    # 4. Même cluster/cause que l'incident précédent (les isolés ne forment pas un cluster)
     if CLUSTER_COL in df.columns:
         df["same_cluster_as_prev"] = (
             df["prev_cluster_id"].notna()
             & (df[CLUSTER_COL] == df["prev_cluster_id"])
+            & (df[CLUSTER_COL] != OUTLIER_LABEL)
         )
 
     return df

@@ -1,11 +1,10 @@
-"""Tests hors ligne de labeling.py et du reclassement des outliers."""
+"""Tests hors ligne de labeling.py."""
 
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
 
-from agentic_pipeline.agent import reassign_outliers_batch
 from agentic_pipeline.config import OUTLIER_LABEL
 from agentic_pipeline.labeling import build_fine_cards, label_fine_clusters
 
@@ -33,6 +32,15 @@ def test_build_fine_cards():
     assert c["severity_distribution"] == {"mineure": 3, "sévère": 1, "modérée": 1}
     assert len(c["representative_texts"]) == 4
     assert all("fuite" in t for t in c["representative_texts"])
+
+
+def test_build_fine_cards_singleton():
+    # Un isolé promu en singleton reçoit sa propre fiche
+    df = pd.DataFrame({"text": ["fuite huile"] * 3 + ["arc électrique isolé"], "severity": ["mineure"] * 4})
+    labels = np.array(["P_F0"] * 3 + ["P_O0"], dtype=object)
+    cards = build_fine_cards(df, labels, np.random.default_rng(0).normal(size=(4, 4)), "P")
+    assert cards["P_O0"]["size"] == 1
+    assert cards["P_O0"]["representative_texts"] == ["arc électrique isolé"]
 
 
 def test_label_valid(no_llm):
@@ -68,43 +76,6 @@ def test_label_default_llm_is_guarded(no_llm):
     # call_llm_json par défaut est lié à l'import : une erreur ne doit pas planter
     out = label_fine_clusters(_cards(), llm=no_llm)
     assert set(out) == {"P_F0", "P_F1"}
-
-
-TAX = [
-    {"cluster_id": "P_F0", "problem_title": "Fuite", "common_cause": "joint"},
-    {"cluster_id": "P_F1", "problem_title": "Vibration", "common_cause": "rotor"},
-]
-OUT = [{"incident_id": 1, "text": "a"}, {"incident_id": 2, "text": "b"}, {"incident_id": 3, "text": "c"}]
-
-
-def test_reassign_valid_unknown_missing(no_llm):
-    fake = lambda **kw: {"classifications": [
-        {"incident_id": 1, "assigned_cluster_id": "P_F1", "reason": "ok"},
-        {"incident_id": 2, "assigned_cluster_id": "ZZ_F9"},
-        "garbage",
-    ]}
-    res = reassign_outliers_batch(OUT, TAX, llm=fake)
-    assert [r["assigned_cluster_id"] for r in res] == ["P_F1", OUTLIER_LABEL, OUTLIER_LABEL]
-    assert res[0]["reason"] == "ok"
-
-
-def test_reassign_malformed(no_llm):
-    for bad in ({"classifications": "nope"}, {"classifications": None}, {}, ["x"]):
-        res = reassign_outliers_batch(OUT, TAX, llm=lambda bad=bad, **kw: bad)
-        assert [r["assigned_cluster_id"] for r in res] == [OUTLIER_LABEL] * 3
-
-
-def test_reassign_llm_exception(no_llm):
-    def boom(**kw):
-        raise RuntimeError("x")
-
-    res = reassign_outliers_batch(OUT, TAX, llm=boom)
-    assert [r["assigned_cluster_id"] for r in res] == [OUTLIER_LABEL] * 3
-
-
-def test_reassign_reason_none(no_llm):
-    fake = lambda **kw: {"classifications": [{"incident_id": 1, "assigned_cluster_id": "P_F0", "reason": None}]}
-    assert reassign_outliers_batch(OUT, TAX, llm=fake)[0]["reason"] == "Analyse causale LLM."
 
 
 def test_default_label_empty_keywords_and_caps(no_llm):

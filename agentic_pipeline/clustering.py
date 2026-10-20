@@ -44,9 +44,9 @@ def embed_partition(texts: list[str]) -> np.ndarray:
     return embed_texts(list(texts), EMBEDDINGS_CACHE_DIR)
 
 
-def reduce_umap(emb: np.ndarray) -> np.ndarray:
-    """Réduction UMAP des embeddings (paramètres et graine fixés dans la config)."""
-    params = dict(UMAP_PARAMS, random_state=RANDOM_STATE)
+def reduce_umap(emb: np.ndarray, random_state: int = RANDOM_STATE) -> np.ndarray:
+    """Réduction UMAP des embeddings (paramètres fixés dans la config, graine par défaut RANDOM_STATE)."""
+    params = dict(UMAP_PARAMS, random_state=random_state)
     n = len(emb)
     # Garde-fou pour les petites partitions : init spectrale impossible (eigsh exige k < N)
     params["n_neighbors"] = max(2, min(params["n_neighbors"], n - 1))
@@ -57,11 +57,16 @@ def reduce_umap(emb: np.ndarray) -> np.ndarray:
 
 
 def dbcv_score(X_umap: np.ndarray, labels: np.ndarray) -> float:
-    """DBCV (hors bruit). Renvoie -1.0 si moins de 2 clusters, en cas d'erreur ou de nan."""
+    """DBCV (hors bruit). Renvoie -1.0 si moins de 2 clusters, en cas d'erreur ou de nan.
+
+    Un cluster d'un seul point (isolé promu en singleton) est traité comme du bruit : le DBCV
+    n'y est pas défini et ferait tomber le score de toute la partition à -1.0.
+    """
     try:
         labels = np.asarray(labels, dtype=object)
-        # Bruit : -1 ou OUTLIER_LABEL (masque élément par élément, labels int ou str)
-        noise = np.array([lab == -1 or lab == OUTLIER_LABEL for lab in labels], dtype=bool)
+        # Bruit : -1, OUTLIER_LABEL ou singleton (masque élément par élément, labels int ou str)
+        counts = pd.Series(labels).value_counts()
+        noise = np.array([lab == -1 or lab == OUTLIER_LABEL or counts[lab] == 1 for lab in labels], dtype=bool)
         kept = labels[~noise]
         codes, uniques = pd.factorize(kept)
         if len(uniques) < 2:

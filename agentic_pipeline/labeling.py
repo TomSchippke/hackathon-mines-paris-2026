@@ -24,7 +24,7 @@ class FineCard(TypedDict):
 
 
 SYSTEM_FINE_LABEL_PROMPT = """Tu es un expert en fiabilité industrielle.
-On te présente un petit groupe d'incidents très similaires (cluster fin) d'un même type d'actif.
+On te présente un incident ou un petit groupe d'incidents très similaires (cluster fin) d'un même type d'actif.
 Donne-lui une étiquette courte et factuelle, SANS recommandation ni action corrective.
 
 Réponds STRICTEMENT avec un objet JSON (textes en français) :

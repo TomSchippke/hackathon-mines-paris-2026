@@ -1,4 +1,4 @@
-"""Calcul des métriques opérationnelles et de la criticité financière (Pareto)."""
+"""Métriques d'impact par cluster (fréquence, coûts, arrêts) et criticité : classement par coût total, paliers Pareto."""
 
 from __future__ import annotations
 
@@ -12,7 +12,11 @@ def compute_cluster_criticality(
     cost_col: str = "estimated_cost_eur",
     downtime_col: str = "downtime_hours",
 ) -> pd.DataFrame:
-    """Calcule pour chaque cluster les métriques d'impact et son niveau de criticité Pareto."""
+    """Calcule pour chaque cluster les métriques d'impact et son niveau de criticité.
+
+    Le classement est fait par coût total décroissant ; le palier (Critique/Élevée/Moyenne/Faible)
+    découle du coût total cumulé (Pareto), la fréquence et le coût moyen sont informatifs.
+    """
     # Agrégation des métriques par cluster
     agg_funcs = {
         cost_col: ["count", "mean", "sum"],

@@ -83,7 +83,11 @@ def merge_of(members):
 def check_invariants(state, res: MergeResult):
     final = {x for x in res.fine_labels.tolist() if x != OUTLIER_LABEL}
     assert set(res.fine_to_merged) == final
-    assert set(sum(res.merged_members.values(), [])) == final
+    kept = {f for f in final if res.fine_to_merged[f] != OUTLIER_LABEL}
+    assert set(sum(res.merged_members.values(), [])) == kept
+    # Aucun id fusionné orphelin, numérotation contiguë
+    assert set(res.fine_to_merged.values()) - {OUTLIER_LABEL} == set(res.merged_members)
+    assert sorted(res.merged_members) == sorted(f"P_M{k}" for k in range(len(res.merged_members)))
     for e in res.log:
         assert LOG_KEYS <= set(e)
 
@@ -315,3 +319,102 @@ def test_split_refused_when_subgroups_get_same_title(no_llm):
     assert "P_F0" in res.fine_to_merged and "P_F0_s0" not in res.fine_to_merged
     flag = [e for e in res.log if e["action"] == "flag_heterogeneous"][0]
     assert flag["accepted"] is False and "indiscernables" in flag["justification"]
+
+
+# --------------------------------------------------------------------------- isolés en singletons
+
+
+def blobs_with_singletons():
+    # P_O0 est au contact de P_F0 ; P_O1 est loin de tout
+    return make_state(
+        [("P_F0", (0, 0), 40, "a"), ("P_F1", (1.2, 0), 40, "a"), ("P_F2", (15, 15), 40, "b"),
+         ("P_F3", (-15, 15), 40, "c"), ("P_O0", (0.3, 0.3), 1, "a"), ("P_O1", (-25, -25), 1, "d")],
+    )
+
+
+def test_veto_still_fires_with_singletons_present(no_llm, monkeypatch):
+    # Régression : un singleton ne doit pas faire tomber le DBCV à -1 et désactiver le garde-fou
+    monkeypatch.setattr("agentic_pipeline.merging.MERGE_DBCV_HARD_DROP", 0.35)
+    st = blobs_with_singletons()
+    llm = FakeLLM(lambda ids, u: {"merges": [merge_of(["P_F0", "P_F2"])] if "P_F2" in ids else [], "flags": []})
+    res = run_merge_agent(st, llm=llm, max_rounds=1)
+    assert res.fine_to_merged["P_F0"] != res.fine_to_merged["P_F2"]
+    vetoed = [e for e in res.log if e.get("vetoed")]
+    assert vetoed and vetoed[0]["dbcv_before"] > 0
+    assert vetoed[0]["critic_verdict"]["hard_veto"] is True
+    check_invariants(st, res)
+
+
+def test_critic_still_called_with_singletons_present(no_llm):
+    st = blobs_with_singletons()
+    llm = FakeLLM(lambda ids, u: {"merges": [merge_of(["P_F0", "P_F2"])] if "P_F2" in ids else [], "flags": []}, critic=False)
+    res = run_merge_agent(st, llm=llm, max_rounds=1)
+    assert res.fine_to_merged["P_F0"] != res.fine_to_merged["P_F2"]
+    assert "merge_critic" in llm.calls
+
+
+def test_singleton_merged_into_cluster(no_llm, monkeypatch):
+    monkeypatch.setattr("agentic_pipeline.merging.MERGE_DBCV_HARD_DROP", 0.35)
+    st = blobs_with_singletons()
+    llm = FakeLLM(lambda ids, u: {"merges": [merge_of(["P_F0", "P_O0"])] if "P_O0" in ids else [], "flags": []},
+                  critic=False)
+    res = run_merge_agent(st, llm=llm, max_rounds=1)
+    mid = res.fine_to_merged["P_O0"]
+    assert mid == res.fine_to_merged["P_F0"] != OUTLIER_LABEL
+    assert res.merged_members[mid] == ["P_F0", "P_O0"]
+    # Fusion d'un singleton : décidée par le LLM de fusion seul, sans critique ni veto
+    assert "merge_critic" not in llm.calls
+    assert not any(e["vetoed"] for e in res.log)
+    check_invariants(st, res)
+
+
+def test_singleton_absorbed_by_merged_node(no_llm):
+    # Un nœud déjà fusionné (singleton + cluster) compte comme un vrai cluster pour le garde-fou
+    st = blobs_with_singletons()
+    seen = {"n": 0}
+
+    def fn(ids, u):
+        seen["n"] += 1
+        if seen["n"] == 1:
+            return {"merges": [merge_of(["P_F0", "P_O0"])], "flags": []}
+        node = next((i for i in ids if "Mtmp" in i), None)
+        return {"merges": [merge_of([node, "P_F2"])] if node and "P_F2" in ids else [], "flags": []}
+
+    llm = FakeLLM(fn, critic=False)
+    res = run_merge_agent(st, llm=llm, max_rounds=2)
+    assert res.fine_to_merged["P_F0"] == res.fine_to_merged["P_O0"] != res.fine_to_merged["P_F2"]
+    vetoed = [e for e in res.log if e["vetoed"]]
+    assert vetoed and set(vetoed[0]["members"]) == {"P_F0", "P_O0", "P_F2"}
+    check_invariants(st, res)
+
+
+def test_unmerged_singleton_becomes_outlier(no_llm):
+    st = blobs_with_singletons()
+    res = run_merge_agent(st, llm=FakeLLM())
+    assert res.fine_to_merged["P_O0"] == res.fine_to_merged["P_O1"] == OUTLIER_LABEL
+    assert "P_O1" in set(res.fine_labels.tolist())  # l'id fin du singleton est conservé
+    assert sorted(res.merged_members) == ["P_M0", "P_M1", "P_M2", "P_M3"]
+    merged = [res.fine_to_merged.get(f, OUTLIER_LABEL) for f in res.fine_labels]
+    assert sum(m == OUTLIER_LABEL for m in merged) == 2
+    check_invariants(st, res)
+
+
+def test_flag_on_singleton_ignored(no_llm):
+    st = blobs_with_singletons()
+    llm = FakeLLM(lambda ids, u: {"merges": [], "flags": [{"fine_cluster_id": "P_O1", "reason": "x"}]} if "P_O1" in ids else {})
+    res = run_merge_agent(st, llm=llm, relabel=lambda labels, ids: ({}, {}))
+    assert res.fine_to_merged["P_O1"] == OUTLIER_LABEL
+    assert not [e for e in res.log if e["action"] == "flag_heterogeneous"]
+    check_invariants(st, res)
+
+
+def test_two_singletons_merged_form_a_cluster(no_llm):
+    st = blobs_with_singletons()
+    llm = FakeLLM(lambda ids, u: {"merges": [merge_of(["P_O0", "P_O1"])] if {"P_O0", "P_O1"} <= set(ids) else [],
+                                  "flags": []}, critic=False)
+    res = run_merge_agent(st, llm=llm, max_rounds=1)
+    assert any(e["action"] == "merge" and not e["vetoed"] for e in res.log)
+    mid = res.fine_to_merged["P_O0"]
+    assert mid == res.fine_to_merged["P_O1"] != OUTLIER_LABEL
+    assert res.merged_members[mid] == ["P_O0", "P_O1"]
+    check_invariants(st, res)

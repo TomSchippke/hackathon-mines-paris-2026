@@ -8,7 +8,7 @@ import pandas as pd
 
 from .llm_client import call_llm_json
 
-CHECKED_KINDS = {"precursor", "escalation"}
+CHECKED_KINDS = {"precursor"}
 MAX_LEN = 500
 
 SYSTEM_PRECURSOR_PROMPT = """Tu es un ingénieur fiabilité expert en maintenance d'équipements et de machines industriels.
@@ -37,12 +37,10 @@ def _card_block(label: str, cid: str, card: dict | None) -> str:
 
 def _build_prompt(row: pd.Series, cards: dict[str, dict]) -> str:
     a, b = str(row["antecedent"]), str(row["consequent"])
-    scope = row.get("scope_cluster", "")
-    scope_txt = f"\nContexte : escalade au sein du cluster {scope}." if isinstance(scope, str) and scope else ""
     return (
         f"{_card_block('Antécédent A', a, cards.get(a))}\n\n"
         f"{_card_block('Conséquent B', b, cards.get(b))}\n\n"
-        f"Statistiques :{scope_txt}\n"
+        "Statistiques :\n"
         f"- Fenêtre : {int(row['window_days'])} jours\n"
         f"- Lift : {float(row['lift']):.2f}\n"
         f"- Nombre de B précédés d'un A (n_hits) : {int(row['n_hits'])}\n"

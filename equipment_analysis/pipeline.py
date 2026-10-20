@@ -1,4 +1,4 @@
-"""Pipeline orchestrant l'analyse par équipement et technicien."""
+"""Pipeline orchestrant l'analyse par équipement."""
 
 from __future__ import annotations
 
@@ -14,9 +14,8 @@ from .config import (
     DEFAULT_INPUT_FULL,
     DEFAULT_INPUT_SEGMENTED,
     DEFAULT_OUT_DIR,
-    RECURRENCE_WINDOWS,
 )
-from .metrics import compute_equipment_metrics, compute_technician_metrics
+from .metrics import compute_equipment_metrics
 from .timeline import compute_equipment_timeline
 
 
@@ -44,7 +43,6 @@ def resolve_input_csv(custom_path: Path | str | None = None) -> Path:
 def run_equipment_analysis(
     input_csv: Path | str | None = None,
     out_dir: Path | str = DEFAULT_OUT_DIR,
-    windows: list[int] = RECURRENCE_WINDOWS,
 ) -> dict[str, Any]:
     """Exécute l'analyse chronologique complète et sauvegarde les résultats."""
     resolved_csv = resolve_input_csv(input_csv)
@@ -56,31 +54,22 @@ def run_equipment_analysis(
     print(f"-> {len(df)} incidents chargés. Calcul des chronologies par équipement...")
 
     # 1. Timeline chronologique
-    timeline_df = compute_equipment_timeline(df, windows=windows)
+    timeline_df = compute_equipment_timeline(df)
     timeline_file = out_path / "incidents_with_timeline.csv"
     timeline_df.to_csv(timeline_file, index=False)
     print(f"   [OK] Chronologie sauvegardée dans {timeline_file}")
 
     # 2. Métriques par équipement
-    eq_metrics_df = compute_equipment_metrics(timeline_df, windows=windows)
+    eq_metrics_df = compute_equipment_metrics(timeline_df)
     eq_file = out_path / "equipment_summary.csv"
     eq_metrics_df.to_csv(eq_file, index=False)
     print(f"   [OK] Synthèse par équipement sauvegardée dans {eq_file}")
 
-    # 3. Métriques par technicien
-    tech_metrics_df = compute_technician_metrics(timeline_df, windows=windows)
-    tech_file = out_path / "technician_performance.csv"
-    tech_metrics_df.to_csv(tech_file, index=False)
-    print(f"   [OK] Performance techniciens sauvegardée dans {tech_file}")
-
-    print(
-        f"-> Analyse terminée avec succès : {len(eq_metrics_df)} équipements et {len(tech_metrics_df)} techniciens analysés."
-    )
+    print(f"-> Analyse terminée avec succès : {len(eq_metrics_df)} équipements analysés.")
 
     return {
         "timeline_df": timeline_df,
         "equipment_df": eq_metrics_df,
-        "technician_df": tech_metrics_df,
         "output_dir": out_path,
     }
 

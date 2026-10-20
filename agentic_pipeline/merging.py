@@ -2,7 +2,8 @@
 
 Un cluster fusionné = une seule action de remédiation concrète qui traite tous ses membres.
 Le DBCV sert de garde-fou (veto sauf confirmation d'un critique) ; un cluster signalé
-hétérogène est re-clusterisé de façon déterministe (balayage HDBSCAN).
+hétérogène est re-clusterisé de façon déterministe (balayage HDBSCAN). Chaque isolé HDBSCAN entre
+comme cluster singleton : fusionné, il rejoint son cluster ; jamais fusionné, il repasse en OUTLIER_LABEL.
 """
 
 from __future__ import annotations
@@ -283,12 +284,16 @@ def run_merge_agent(
 
     Les drapeaux d'hétérogénéité ne s'appliquent qu'aux clusters fins non fusionnés.
     Les points de bruit d'un re-découpage sont rattachés au sous-cluster le plus proche.
+    Un nœud d'un seul incident (singleton) est ignoré par le DBCV : une fusion qui ne réunit pas
+    au moins deux nœuds de plus d'un incident est décidée par le seul LLM de fusion. Un singleton
+    jamais fusionné sort avec fine_to_merged = OUTLIER_LABEL et hors de merged_members.
     """
     partition = state.partition
     X = np.asarray(state.X_umap)
     E = np.asarray(state.embeddings, dtype=float)
     fine = np.array(list(state.fine_labels), dtype=object)  # étiquettes fines (avec scissions)
     cur = fine.copy()  # étiquettes de nœuds (fins ou fusionnés)
+    cur_dbcv: float | None = None  # DBCV de `cur`, à recalculer (None) dès que `cur` change
     cards = {k: dict(v) for k, v in state.cards.items()}
     titles = {k: dict(v) for k, v in state.titles.items()}
 
@@ -335,21 +340,26 @@ def run_merge_agent(
                 proposed = frozenset(f for x in members for f in nodes[x].members)
                 if any(r <= proposed for r in rejected):
                     continue  # reformulation d'une fusion déjà refusée
-                before = dbcv_score(X, cur)
+                # Garde-fou DBCV seulement si au moins deux nœuds de plus d'un incident sont réunis
+                guarded = sum(int((cur == x).sum()) > 1 for x in members) >= 2
                 trial = cur.copy()
                 counter += 1
                 new_id = f"{partition}_Mtmp{counter}"
                 for x in members:
                     trial[trial == x] = new_id
-                after = dbcv_score(X, trial)
+                before = after = drop = None  # DBCV inutile sans garde-fou
+                if guarded:
+                    if cur_dbcv is None:
+                        cur_dbcv = dbcv_score(X, cur)
+                    before, after = cur_dbcv, dbcv_score(X, trial)
+                    drop = (before - after) / max(abs(before), 1e-9)
                 vetoed, verdict = False, None
-                drop = (before - after) / max(abs(before), 1e-9)
-                if before > 0 and drop > MERGE_DBCV_HARD_DROP:
+                if guarded and before > 0 and drop > MERGE_DBCV_HARD_DROP:
                     # Veto ferme : le critique LLM, trop conciliant, ne peut pas l'outrepasser
                     vetoed = True
                     verdict = {"single_specific_remediation": False, "hard_veto": True,
                                "reason": f"chute du DBCV {drop:.0%} > {MERGE_DBCV_HARD_DROP:.0%}"}
-                elif before > 0 and drop > MERGE_DBCV_MAX_DROP:
+                elif guarded and before > 0 and drop > MERGE_DBCV_MAX_DROP:
                     critic_user = (
                         f"Fusion proposée (chute relative du DBCV : {drop:.0%}).\n"
                         f"Remédiation commune annoncée : {m['shared_remediation']}\n"
@@ -396,8 +406,8 @@ def run_merge_agent(
                     "shared_remediation": m["shared_remediation"],
                     "prevented_outcomes": outcomes,
                     "justification": m["justification"],
-                    "dbcv_before": float(before),
-                    "dbcv_after": float(after),
+                    "dbcv_before": None if before is None else float(before),
+                    "dbcv_after": None if after is None else float(after),
                     "vetoed": bool(vetoed),
                     "critic_verdict": verdict,
                 }
@@ -406,6 +416,7 @@ def run_merge_agent(
                     rejected.append(proposed)
                     continue
                 cur = trial
+                cur_dbcv = after  # None si fusion sans garde-fou
                 nodes[new_id] = _Node(new_id, flat)
                 for x in members:
                     parent_of[x] = new_id
@@ -418,9 +429,13 @@ def run_merge_agent(
             fid = fl["fine_cluster_id"]
             if fid in seen_flags or fid not in nodes or nodes[fid].members != [fid] or fid not in set(fine.tolist()):
                 continue
+            if int((cur == fid).sum()) < 2:  # un singleton ne se découpe pas
+                continue
             seen_flags.add(fid)
             rows = np.where(cur == fid)[0]
             sizes = [s for s in MCS_SWEEP if s < len(rows) / 2]
+            if cur_dbcv is None:
+                cur_dbcv = dbcv_score(X, cur)
             entry = {
                 "round": rnd,
                 "action": "flag_heterogeneous",
@@ -429,7 +444,7 @@ def run_merge_agent(
                 "shared_remediation": "",
                 "prevented_outcomes": [],
                 "justification": fl["reason"],
-                "dbcv_before": float(dbcv_score(X, cur)),
+                "dbcv_before": float(cur_dbcv),
                 "dbcv_after": None,
                 "vetoed": False,
                 "critic_verdict": None,
@@ -469,7 +484,8 @@ def run_merge_agent(
                 else:
                     fine[:] = trial_fine
                     cur[rows] = trial_fine[rows]
-                    entry["dbcv_after"] = float(dbcv_score(X, cur))
+                    cur_dbcv = dbcv_score(X, cur)
+                    entry["dbcv_after"] = float(cur_dbcv)
                     entry["result_id"] = list(new_ids)
                     entry["accepted"] = True
                     parent_card, pt = cards.get(fid, {}), titles.get(fid, {})
@@ -491,10 +507,16 @@ def run_merge_agent(
         if accepted == 0:
             break
 
-    # -------- numérotation finale par taille décroissante
-    order = sorted(nodes.values(), key=lambda n: (-int((cur == n.id).sum()), sorted(n.members)[0]))
-    final_id = {n.id: f"{partition}_M{k}" for k, n in enumerate(order)}
+    # -------- numérotation finale par taille décroissante (singletons jamais fusionnés : isolés)
     fine_to_merged: dict[str, str] = {}
+    lone = {nid for nid in nodes if int((cur == nid).sum()) == 1}
+    for nid in sorted(lone):
+        fine_to_merged[nid] = OUTLIER_LABEL
+    order = sorted(
+        (n for n in nodes.values() if n.id not in lone),
+        key=lambda n: (-int((cur == n.id).sum()), sorted(n.members)[0]),
+    )
+    final_id = {n.id: f"{partition}_M{k}" for k, n in enumerate(order)}
     merged_members: dict[str, list[str]] = {}
     for n in order:
         mid = final_id[n.id]

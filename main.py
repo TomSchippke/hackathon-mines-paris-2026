@@ -4,16 +4,17 @@
   2. topics        topic modeling BERTopic sur tous les incidents     -> outputs/topics/ (optionnel)
   3. segmentation  clustering agentique des incidents                 -> outputs/segmentation/
   4. equipment     analyse par équipement                             -> outputs/equipment/
-  5. webapp        application Streamlit de visualisation
+  5. report        rapport opérationnel HTML statique                 -> outputs/rapport_operationnel.html
 
 Chaque étape met ses résultats en cache dans outputs/cache/ : relancer ne refait que ce qui a
 changé (nouveaux PDF, nouveaux textes).
 
 Usage :
-    python main.py                        # pdf, segmentation, equipment (défaut)
+    python main.py                        # pdf, segmentation, equipment, report (défaut)
     python main.py --steps topics         # seulement le topic modeling (optionnel)
-    python main.py --steps segmentation equipment webapp
+    python main.py --steps segmentation equipment
     python main.py --steps topics --min-cluster-size 15
+    python main.py --steps report --summary llm   # synthèse rédigée par le LLM (un appel)
 """
 
 from __future__ import annotations
@@ -29,17 +30,21 @@ from topic_modeling import config as topic_config
 from topic_modeling.pipeline import run as run_topics
 from agentic_pipeline.pipeline import run_agentic_segmentation
 from equipment_analysis.pipeline import run_equipment_analysis
+from report.build import build_report
 
-STEPS = ["pdf", "topics", "segmentation", "equipment", "webapp"]
+STEPS = ["pdf", "topics", "segmentation", "equipment", "report"]
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--steps", nargs="+", choices=STEPS, default=["pdf", "segmentation", "equipment"], help="étapes à lancer")
+    parser.add_argument("--steps", nargs="+", choices=STEPS, default=["pdf", "segmentation", "equipment", "report"],
+                        help="étapes à lancer")
     parser.add_argument("--csv", type=Path, default=pdf_config.DEFAULT_CSV, help="CSV des incidents")
     parser.add_argument("--out-dir", type=Path, default=Path("outputs"))
     parser.add_argument("--min-cluster-size", type=int, default=topic_config.MIN_CLUSTER_SIZE,
                         help="taille minimale des clusters (étape topics uniquement)")
+    parser.add_argument("--summary", choices=["template", "llm"], default="template",
+                        help="synthèse du rapport : gabarit déterministe ou LLM (étape report uniquement)")
     args = parser.parse_args()
 
     os.chdir(Path(__file__).resolve().parent)  # chemins relatifs à la racine du repo
@@ -68,9 +73,13 @@ def main() -> None:
                 input_csv=incidents_file,
                 out_dir=args.out_dir / "equipment",
             )
-        elif step == "webapp":
-            import subprocess
-            subprocess.run(["uv", "run", "streamlit", "run", "webapp/app.py"])
+        elif step == "report":
+            build_report(
+                seg_dir=args.out_dir / "segmentation",
+                eq_dir=args.out_dir / "equipment",
+                out_path=args.out_dir / "rapport_operationnel.html",
+                summary=args.summary,
+            )
         print(f"-> étape {step} terminée en {time.time() - start:.0f} s")
 
 

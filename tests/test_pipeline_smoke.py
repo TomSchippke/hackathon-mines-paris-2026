@@ -12,7 +12,8 @@ import pandas as pd
 import pytest
 
 from agentic_pipeline import clustering, pipeline
-from agentic_pipeline.precursors import mine_escalations, mine_precursors
+from agentic_pipeline.escalation import ESCALATION_COLUMNS
+from agentic_pipeline.precursors import mine_precursors
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data" / "incidents_full.csv"
@@ -28,16 +29,18 @@ EXPECTED_COLUMNS = {
                         "mean_downtime_hours", "total_downtime_hours", "problem_title",
                         "problem_description", "common_cause", "common_cause_quotes",
                         "common_cause_source", "system_impact", "prevented_outcomes",
-                        "recommendations", "early_warning_rules", "nominal", "nominal_reason"],
+                        "recommendations", "early_warning_rules", "nominal", "nominal_reason", "nominal_external_condition",
+                        "nominal_external_quote"],
     "concentration": ["merged_cluster_id", "dimension", "value", "observed", "expected", "lift",
                       "p_value", "q_value", "significant"],
-    "precursor_pairs": ["kind", "partition", "scope_cluster", "antecedent", "consequent",
+    "precursor_pairs": ["kind", "partition", "antecedent", "consequent",
                         "window_days", "n_hits", "n_equipments", "n_consequent", "expected_hits",
                         "lift", "p_value", "q_value", "is_best_window", "significant", "plausible",
                         "mechanism", "monitoring_rule"],
     "precursor_evidence": ["rule_id", "consequent_incident_id", "equipment_id", "consequent_date",
                            "antecedent_incident_ids", "antecedent_dates", "n_antecedents",
                            "window_days"],
+    "escalations": ESCALATION_COLUMNS,
     "fine_sweep": ["partition", "min_cluster_size", "n_clusters", "outlier_rate", "dbcv"],
 }
 
@@ -63,12 +66,6 @@ class FakeLLM:
         h = zlib.crc32(user_prompt.encode()) % 100000
         if cache_tag == "fine_label":
             return {"fine_title": f"Défaut type {h}", "failure_mode": f"Mode de défaillance {h}"}
-        if cache_tag == "outlier_reassignment":
-            ids = re.findall(r"^- ID: (\S+) \|", user_prompt, flags=re.M)
-            incs = re.findall(r"^Incident ID (\S+) :", user_prompt, flags=re.M)
-            return {"classifications": [
-                {"incident_id": inc, "assigned_cluster_id": ids[j % len(ids)] if j % 2 == 0 else "inconnu",
-                 "reason": "test"} for j, inc in enumerate(incs)]}
         if cache_tag == "merge":
             ids = re.findall(r"^### Cluster (\S+) \(taille", user_prompt, flags=re.M)
             if len(ids) < 2:
@@ -84,7 +81,11 @@ class FakeLLM:
             return {"plausible": True, "mechanism": "dégradation progressive", "monitoring_rule": "si 2 A en 30 j -> inspecter"}
         if cache_tag == "nominal_check":
             return {"protection_only": True, "defect_found": False, "reason": "test"}
-        if cache_tag == "diagnosis_v3":
+        if cache_tag == "cause_retry":
+            return {"common_cause": "cause déduite", "quotes": ["citation inventée absente des rapports"]}
+        if cache_tag == "recommendation_critic":
+            return {"recommendations": []}
+        if cache_tag == "diagnosis_v4":
             return {"problem_title": f"Diagnostic {h}", "problem_description": "desc", "common_cause": "cause",
                     "system_impact": "impact", "prevented_outcomes": ["arrêt machine"],
                     "common_cause_quotes": ["citation inventée absente des rapports"],
@@ -120,9 +121,7 @@ def test_pipeline_smoke(sample_csv, tmp_path, monkeypatch, no_llm):
     # Seuils assouplis pour exercer plausibilité + preuves même sur 200 lignes
     monkeypatch.setattr(pipeline, "mine_precursors", lambda *a, **k: mine_precursors(
         *a, min_hits=2, min_equipments=1, fdr=1.0, **k))
-    monkeypatch.setattr(pipeline, "mine_escalations", lambda *a, **k: mine_escalations(
-        *a, min_hits=2, min_equipments=1, fdr=1.0, **k))
-    # Force des isolés (bruit HDBSCAN) pour exercer reclassement et cluster isole_atypique
+    # Force des isolés (bruit HDBSCAN) pour exercer les singletons et le cluster isole_atypique
     real_sweep = clustering.sweep_hdbscan
 
     def sweep_with_noise(X, sizes=None):
@@ -149,17 +148,27 @@ def test_pipeline_smoke(sample_csv, tmp_path, monkeypatch, no_llm):
     assert len(seg) == n
     assert seg["fine_cluster_id"].notna().all() and seg["merged_cluster_id"].notna().all()
     assert (seg["cluster_id"] == seg["merged_cluster_id"]).all()
-    assert set(seg["assignment_source"]) <= {"dense_cluster", "llm_reassigned", "unclassified_outlier"}
+    assert set(seg["assignment_source"]) <= {"dense_cluster", "merged_singleton", "unclassified_outlier"}
     merged = pd.read_csv(paths["clusters_merged"])
     assert set(seg["merged_cluster_id"]) == set(merged["merged_cluster_id"])
     for c in ("prevented_outcomes", "recommendations", "early_warning_rules", "fine_cluster_ids"):
         assert all(isinstance(json.loads(v), list) for v in merged[c])
-    # cibles inventées filtrées par la validation du diagnostic ; citation inventée : cause non justifiée
+    # cibles inventées filtrées par la validation du diagnostic ; citation inventée : cause inférée
     diagnosed = merged[merged["merged_cluster_id"] != "isole_atypique"]
-    assert (diagnosed["common_cause_source"] == "non_citee").all()
+    assert (diagnosed["common_cause_source"] == "inferee").all()
     assert all(t not in str(r) for r in merged["recommendations"] for t in ["EQUIP-INVENTE"])
     print("sources:", seg["assignment_source"].value_counts().to_dict(), "calls:", llm.calls,
           "evidence rows:", len(pd.read_csv(paths["precursor_evidence"])))
-    assert llm.calls.get("outlier_reassignment", 0) > 0
+    assert "outlier_reassignment" not in llm.calls
+    # isolés HDBSCAN : rattachés (cluster fusionné) ou restés isolés (isole_atypique), jamais l'inverse
+    src = seg["assignment_source"]
+    assert src.isin(["merged_singleton", "unclassified_outlier"]).any()
+    assert ((src == "unclassified_outlier") == (seg["merged_cluster_id"] == "isole_atypique")).all()
+    fine = pd.read_csv(paths["clusters_fine"], keep_default_na=False)
+    assert (fine["merged_cluster_id"] != "").all()
+    pairs = pd.read_csv(paths["precursor_pairs"])
+    assert "scope_cluster" not in pairs.columns and not (pairs["kind"] == "escalation").any()
+    esc = pd.read_csv(paths["escalations"])
+    assert list(esc.columns) == ESCALATION_COLUMNS
     assert "isole_atypique" in set(seg["merged_cluster_id"])
-    assert llm.calls.get("fine_label", 0) > 0 and llm.calls.get("diagnosis_v3", 0) > 0
+    assert llm.calls.get("fine_label", 0) > 0 and llm.calls.get("diagnosis_v4", 0) > 0
