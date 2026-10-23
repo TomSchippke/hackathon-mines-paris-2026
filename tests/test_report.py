@@ -10,10 +10,10 @@ import pandas as pd
 import pytest
 
 from agentic_pipeline.config import OUTLIER_LABEL
-from report.build import METHOD_NAME, build_report
+from report.build import build_report
 
-SECTIONS = ["Actions ciblées", "Programmes flotte", "Preuves par groupe", "Sans action requise"]
-METHOD_SECTIONS = ["Construction", "Vue flotte", "Qualité des actions", "Résultats négatifs", "Limites"]
+TABS = ["synthese", "ciblees", "flotte", "preuves", "sans-action", "methode"]
+METHOD_TITLES = ["Construction", "Coût par site et type d'actif", "Qualité des actions", "Résultats négatifs", "Limites"]
 TEXT = {1: "Le roulement principal présente une usure avancée du chemin de roulement.",
         2: "Le roulement principal a surchauffé, usure avancée du chemin de roulement constatée.",
         3: "Usure avancée du chemin de roulement sur le roulement principal, remplacement.",
@@ -119,27 +119,53 @@ def _build(d: dict, **kw) -> str:
 
 
 def _section(html: str, anchor: str) -> str:
-    m = re.search(rf'<section id="{anchor}">(.*?)</section>', html, re.S)
+    m = re.search(rf'<section id="{anchor}" class="tab[^"]*">(.*?)</section>', html, re.S)
     assert m, anchor
     return m.group(1)
 
 
 def _method(d: dict) -> str:
-    return (d["out"].parent / METHOD_NAME).read_text(encoding="utf-8")
+    return _section(d["out"].read_text(encoding="utf-8"), "methode")
 
 
-def test_sections_and_no_external_resources(fixture_dirs, no_llm):
+def test_tabs_and_no_external_resources(fixture_dirs, no_llm):
     html = _build(fixture_dirs)
     assert 'id="entete"' in html
-    for title in SECTIONS:
-        assert f"<h2>{title}</h2>" in html.replace("&#39;", "'")
-    method = _method(fixture_dirs)
-    for title in METHOD_SECTIONS:
-        assert f"<h2>{title}</h2>" in method
-    for page in (html, method):
-        assert "http" not in page and "<script" not in page
-    assert not (fixture_dirs["out"].parent / "rapport_synthese_alt.html").exists()
-    assert "Synthèse" not in html and "bad actor" not in html
+    nav = re.search(r'<nav class="tabs".*?</nav>', html, re.S).group(0)
+    assert re.findall(r'href="#([^"]+)"', nav) == TABS
+    assert re.findall(r'<section id="([^"]+)" class="tab', html) == TABS
+    assert '<section id="synthese" class="tab default">' in html  # premier onglet affiché par défaut
+    for title in METHOD_TITLES:
+        assert f"<h3>{title}</h3>" in _method(fixture_dirs).replace("&#39;", "'")
+    assert "http" not in html and "<script" not in html
+    assert not (fixture_dirs["out"].parent / "methode.html").exists()
+    assert "bad actor" not in html
+
+
+def test_summary_tab_kpis_monthly_and_segmentation(fixture_dirs, no_llm):
+    synth = _section(_build(fixture_dirs), "synthese")
+    assert "36\u202f000\u00a0€" in synth  # coût total des 8 incidents
+    assert 'class="chart monthly"' in synth and "<polyline" in synth
+    assert "<svg" in synth and 'class="chart pareto"' in synth
+    for title in ("Usure du roulement principal", "Gaine de câble fissurée", "Protection sur rafale",
+                  "Incidents isolés et anomalies atypiques"):
+        assert title in synth
+    assert "Description Usure du roulement principal." in synth
+    assert "nominal" in synth and "isolés" in synth
+    for word in ("Remplacer", "Graisser", 'class="aid"'):  # aucune action dans la synthèse
+        assert word not in synth
+
+
+def test_filters_asset_and_site(fixture_dirs, no_llm):
+    html = _build(fixture_dirs)
+    assert 'id="f-asset-wind"' in html and 'id="f-site-parc-a"' in html and 'id="f-site-parc-b"' in html
+    assert 'body:has(#f-asset-wind:checked) .filterable[data-asset]:not([data-asset="wind"])' in html
+    assert 'body:has(#f-site-parc-a:checked) tr.filterable[data-site]:not([data-site="parc-a"])' in html
+    targets = _section(html, "ciblees")
+    assert 'data-asset="wind" data-site="parc-a"' in targets
+    assert 'class="filterable" data-asset="wind"' in _section(html, "flotte")
+    assert 'data-asset="wind"' in _section(html, "preuves")
+    assert "data-asset" not in _section(html, "synthese")  # la synthèse n'est jamais filtrée
 
 
 def test_targets_ranked_by_own_cost_with_escalation(fixture_dirs, no_llm):
@@ -148,7 +174,7 @@ def test_targets_ranked_by_own_cost_with_escalation(fixture_dirs, no_llm):
     assert targets.index("WTG01") < targets.index("Parc A")
     assert "6 000 €" in targets and "4 000 €" in targets
     assert "9 000" not in targets  # coût du groupe wind_M1, jamais affiché pour la cible
-    assert "agir avant la prochaine occurrence" in targets and 'class="escalating"' in targets
+    assert "agir avant la prochaine occurrence" in targets and 'filterable escalating"' in targets
     assert "<b>Remplacer</b> roulement principal" in targets and "chemin de roulement usé" in targets
     for label in ("escalade", "concentration", "à vérifier", "cause inférée – à confirmer"):
         assert label in targets
@@ -220,13 +246,13 @@ def test_nominal_and_isolated_not_in_tables(fixture_dirs, no_llm):
 def test_method_page_quality_and_charts(fixture_dirs, no_llm):
     _build(fixture_dirs)
     method = _method(fixture_dirs)
-    quality = _section(method, "qualite")
+    quality = method.split("<h3>Qualité des actions</h3>")[1].split("<h3>")[0]
     # 4 actions au plan : 2 valides, 1 corrigée, 1 par défaut
     assert re.search(r"<b class=\"num\">2</b><span>acceptées du premier coup", quality)
     assert re.search(r"<b class=\"num\">1</b><span>acceptées après relance", quality)
     assert "actions par défaut (25" in quality
     assert "1/2</b><span>causes citées" in quality
-    assert "<svg" in _section(method, "vue-flotte") and "rapport_operationnel.html#voie-wind_M0" in method
+    assert "<svg" in method
     assert "Sur ce run" not in method
 
 
@@ -241,7 +267,7 @@ def test_every_escalation_series_gets_a_row(fixture_dirs, no_llm):
     assert "WTG01" in targets and "<b>Inspecter</b> l&#39;équipement" in targets
     assert "ajoutée par le code" in targets and "agir avant la prochaine occurrence" in targets
     assert "<svg" in _section(html, "preuves")  # la frise reste dans la fiche
-    quality = _section(_method(fixture_dirs), "qualite")
+    quality = _method(fixture_dirs).split("<h3>Qualité des actions</h3>")[1].split("<h3>")[0]
     assert "1 série en escalade" in quality and "1</b><span>acceptées du premier coup" in quality
 
 

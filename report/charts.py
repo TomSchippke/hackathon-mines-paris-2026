@@ -16,6 +16,9 @@ from markupsafe import Markup
 
 from .formatting import date_fr, eur, eur_short, pct
 
+MONTHS_LONG = ["janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août", "septembre",
+               "octobre", "novembre", "décembre"]
+
 _ids = count(1)  # identifiants uniques des <title>/<desc> au sein d'une page
 
 
@@ -157,5 +160,58 @@ def timeline_svg(points: list[dict], title: str) -> Markup:
         label = f'<text class="idlabel" x="{x:.1f}" y="{y0 + 26 + 16 * level}" text-anchor="middle">#{escape(str(p["id"]))}</text>'
         out.append(f'<a href="{escape(p["href"])}">{label}</a>' if p.get("href") else label)
         out.append("</g>")
+    out.append("</svg>")
+    return Markup("\n".join(out))
+
+
+def monthly_svg(series: list[dict]) -> Markup:
+    """Coût mensuel des incidents, une courbe par type d'actif sur le même axe (euros).
+
+    `series` : dicts {label, cat, points: [(pd.Period mois, coût)]}, mêmes mois pour chaque série.
+    Lignes de 2 px, nom de la série au bout de sa courbe ; infobulle native par mois et par série.
+    """
+    if not series or not series[0]["points"]:
+        return Markup("")
+    W, H, x0, x1, top, bottom = 760, 260, 64, 668, 20, 226
+    months = [m for m, _ in series[0]["points"]]
+    vmax = max(c for s in series for _, c in s["points"]) or 1.0
+    step = _nice_step(vmax)
+    vtop = step * math.ceil(vmax / step)
+    xs = [x0 + (x1 - x0) * i / max(len(months) - 1, 1) for i in range(len(months))]
+
+    def ypos(v: float) -> float:
+        return bottom - (bottom - top) * v / vtop
+
+    out = _open_svg(W, H, "Coût mensuel des incidents par type d'actif",
+                    f"{len(months)} mois, de {months[0].strftime('%m/%Y')} à {months[-1].strftime('%m/%Y')} ; "
+                    + " ; ".join(f"{s['label']} : {eur(sum(c for _, c in s['points']))} au total" for s in series)
+                    + ".", "monthly")
+    v = 0.0
+    while v <= vtop * 1.0001:
+        y = ypos(v)
+        out.append(f'<line class="grid" x1="{x0}" y1="{y:.1f}" x2="{x1}" y2="{y:.1f}"/>')
+        out.append(f'<text class="tick" x="{x0 - 8}" y="{y + 4:.1f}" text-anchor="end">{escape(eur_short(v))}</text>')
+        v += step
+    for i, m in enumerate(months):
+        if m.month == 1 or i == 0:
+            out.append(f'<line class="axis" x1="{xs[i]:.1f}" y1="{bottom}" x2="{xs[i]:.1f}" y2="{bottom + 5}"/>')
+            out.append(f'<text class="tick" x="{xs[i]:.1f}" y="{bottom + 20}" text-anchor="middle">'
+                       f'{escape(m.strftime("%m/%Y") if i == 0 and m.month != 1 else str(m.year))}</text>')
+    out.append(f'<line class="axis" x1="{x0}" y1="{bottom}" x2="{x1}" y2="{bottom}"/>')
+    for s in series:
+        pts = " ".join(f"{x:.1f},{ypos(c):.1f}" for x, (_, c) in zip(xs, s["points"]))
+        out.append(f'<polyline class="line cat-{s["cat"]}" points="{pts}"/>')
+        last = s["points"][-1][1]
+        out.append(f'<text class="value" x="{x1 + 8}" y="{ypos(last) + 4:.1f}">{escape(s["label"])}</text>')
+    # Zones de survol : une colonne par mois, infobulle avec les deux séries
+    half = (x1 - x0) / max(len(months) - 1, 1) / 2
+    for i, m in enumerate(months):
+        tip = f"{MONTHS_LONG[m.month - 1]} {m.year} : " + " ; ".join(
+            f"{s['label']} {eur(s['points'][i][1])}" for s in series)
+        out.append(f'<g class="hover"><title>{escape(tip)}</title>'
+                   f'<rect class="hit" x="{xs[i] - half:.1f}" y="{top}" width="{2 * half:.1f}" height="{bottom - top}"/>'
+                   f'<line class="crosshair" x1="{xs[i]:.1f}" y1="{top}" x2="{xs[i]:.1f}" y2="{bottom}"/>'
+                   + "".join(f'<circle class="dot cat-{s["cat"]}" cx="{xs[i]:.1f}" cy="{ypos(s["points"][i][1]):.1f}" r="4"/>'
+                             for s in series) + "</g>")
     out.append("</svg>")
     return Markup("\n".join(out))

@@ -8,7 +8,7 @@
   --sev-severe: #d03b3b; --sev-moderee: #ec835a; --sev-mineure: #fab219; --sev-na: #898781;
   --tier-critique: var(--sev-severe); --tier-elevee: var(--sev-moderee);
   --tier-moyenne: var(--sev-mineure); --tier-faible: #a9a79f;
-  --cat-1: #2a78d6; --cat-2: #6250d6; --cat-0: #898781;
+  --cat-1: #2a78d6; --cat-2: #eb6834; --cat-0: #898781;
   --warn-bg: #fdf1d6; --warn-ink: #6b4a00;
   --note-bg: #eef0f3; --note-ink: #3a4250;
 }
@@ -20,7 +20,7 @@
     --line: #2c2c2a; --axis: #4a4a46;
     --accent: #6da7ec; --accent-soft: #17283d;
     --tier-faible: #6f6d66;
-    --cat-1: #3987e5; --cat-2: #9085e9;
+    --cat-1: #3987e5; --cat-2: #d95926;
     --warn-bg: #3a2c08; --warn-ink: #f5d58a;
     --note-bg: #22262c; --note-ink: #c9d0da;
   }
@@ -32,7 +32,7 @@
   --line: #2c2c2a; --axis: #4a4a46;
   --accent: #6da7ec; --accent-soft: #17283d;
   --tier-faible: #6f6d66;
-  --cat-1: #3987e5; --cat-2: #9085e9;
+  --cat-1: #3987e5; --cat-2: #d95926;
   --warn-bg: #3a2c08; --warn-ink: #f5d58a;
   --note-bg: #22262c; --note-ink: #c9d0da;
 }
@@ -153,6 +153,35 @@ ul.acts > li:last-child { margin-bottom: 0; }
 .cost small { display: block; color: var(--muted); font-size: .78rem; }
 .intro { font-size: .9rem; color: var(--ink-2); margin: 0 0 8px; }
 .pagelink { font-size: .9rem; }
+/* Onglets : CSS seul. Le premier onglet est affiché par défaut ; un fragment (#onglet ou #ancre
+   interne à un onglet) affiche l'onglet qui le contient. */
+nav.tabs { display: flex; flex-wrap: wrap; gap: 2px; margin: 16px 0 0; border-bottom: 2px solid var(--line); }
+nav.tabs a { padding: 8px 14px; font-size: .92rem; font-weight: 600; color: var(--ink-2); text-decoration: none;
+             border-radius: 8px 8px 0 0; margin-bottom: -2px; border-bottom: 2px solid transparent; }
+nav.tabs a:hover { background: var(--sunken); color: var(--ink); }
+.tab { display: none; }
+.tab.default { display: block; }
+body:has(.tab:target, .tab :target) .tab { display: none; }
+body:has(.tab:target, .tab :target) .tab:is(:target, :has(:target)) { display: block; }
+.tab > h2:first-child { margin-top: 20px; }
+/* Filtres (boutons radio, CSS seul) */
+.filters { display: none; flex-wrap: wrap; gap: 8px 20px; align-items: center; margin: 12px 0 0; font-size: .86rem; }
+.fgroup { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.fgroup > span { color: var(--muted); margin-right: 4px; }
+.filters input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.filters label { cursor: pointer; padding: 2px 10px; border: 1px solid var(--line); border-radius: 999px;
+                 background: var(--surface); color: var(--ink-2); }
+.filters input:checked + label { background: var(--accent-soft); border-color: var(--accent); color: var(--ink); font-weight: 600; }
+.filters input:focus-visible + label { outline: 2px solid var(--accent); outline-offset: 2px; }
+.site-filter { display: none; }
+/* Courbes */
+svg.chart polyline.line { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+svg.chart polyline.cat-1 { stroke: var(--cat-1); } svg.chart polyline.cat-2 { stroke: var(--cat-2); }
+svg.chart .crosshair { stroke: var(--axis); stroke-width: 1; }
+svg.chart .hover .crosshair, svg.chart .hover .dot { opacity: 0; }
+svg.chart .hover:hover .crosshair, svg.chart .hover:hover .dot { opacity: 1; }
+svg.monthly { min-width: 600px; }
+td.desc { font-size: .84rem; color: var(--ink-2); }
 @media (max-width: 600px) {
   body { font-size: 14px; }
   h1 { font-size: 1.3rem; }
@@ -164,7 +193,8 @@ ul.acts > li:last-child { margin-bottom: 0; }
   :root { --bg: #fff; --surface: #fff; --sunken: #fff; --accent-soft: #fff; --warn-bg: #fff; --note-bg: #fff; }
   body { font-size: 10.5pt; background: #fff; }
   main { max-width: none; padding: 0; }
-  nav.toc { display: none; }
+  nav.toc, nav.tabs, .filters { display: none !important; }
+  .tab { display: block !important; }
   details::details-content { content-visibility: visible; display: block; }
   details > summary { list-style: none; }
   details.voie, ol.actions > li, .card, .kpi { break-inside: avoid-page; border-color: #bbb; }

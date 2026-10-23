@@ -1,16 +1,16 @@
 """Assemblage du rapport opérationnel : chargement des sorties, contexte (dicts simples), rendu Jinja2.
 
 Entrées : `outputs/segmentation/` (incidents segmentés, clusters fins et fusionnés, concentrations,
-escalades, précurseurs) et, s'il existe, `outputs/diagnostics/umap_stability.csv`. Sorties : deux pages
-HTML autonomes (aucune ressource externe, aucun JavaScript) :
+escalades, précurseurs) et, s'il existe, `outputs/diagnostics/umap_stability.csv`. Sortie : un fichier
+HTML autonome (aucune ressource externe, aucun JavaScript) à onglets :
 
-- `rapport_operationnel.html` (exploitation) : actions ciblées (une ligne par équipement ou site,
-  classées par le coût des incidents de cette cible), programmes flotte (classés par le coût du groupe),
-  fiches de preuves par groupe, groupes sans action requise ;
-- `methode.html` (jury) : construction, vue flotte, qualité des actions mesurée par le code,
-  résultats négatifs et limites.
+- Synthèse : chiffres clés, coût mensuel par type d'actif, segmentation des problèmes et Pareto ;
+- Actions ciblées (une ligne par équipement ou site, classées par le coût des incidents de cette cible),
+  Programmes flotte (classés par le coût du groupe), Preuves par groupe, Sans action requise ;
+- Méthode (jury) : construction, qualité des actions mesurée par le code, résultats négatifs, limites.
 
-Les actions sont numérotées A1..An dans l'ordre de lecture : actions ciblées, puis programmes flotte.
+Onglets et filtres (type d'actif, site) sont en CSS seul (`:target`, `:has`). Les actions sont
+numérotées A1..An dans l'ordre de lecture : actions ciblées, puis programmes flotte.
 """
 
 from __future__ import annotations
@@ -36,7 +36,6 @@ from . import charts, formatting
 
 DEFAULT_SEG_DIR = Path("outputs/segmentation")
 DEFAULT_OUT = Path("outputs/rapport_operationnel.html")
-METHOD_NAME = "methode.html"
 TEMPLATE_DIR = Path(__file__).parent / "templates"
 
 MAX_QUOTE_INCIDENTS = 6  # incidents affichés par citation
@@ -238,7 +237,7 @@ def _action(rec: dict, voie: dict, data: dict, incidents: Incidents) -> dict:
         "scope": scope, "scope_label": SCOPE_LABELS.get(scope, scope), "targets": targets,
         "escalation": any(t["escalation"] for t in targets), "verdict": _s(rec.get("critic_verdict")),
         "badges": [{"slug": b, "label": BADGES[b]} for b in badges],
-        "voie_id": voie["id"], "voie_title": voie["title"], "voie_anchor": voie["anchor"],
+        "voie_id": voie["id"], "voie_title": voie["title"], "voie_anchor": voie["anchor"], "asset": voie["asset"],
     }
 
 
@@ -249,7 +248,7 @@ def _voie_base(row: dict, fleet_cost: float) -> dict:
         "id": str(row["merged_cluster_id"]), "anchor": f"voie-{row['merged_cluster_id']}",
         "rank": int(row["criticality_rank"]), "title": _s(row.get("problem_title")) or str(row["merged_cluster_id"]),
         "tier": tier, "tier_slug": _slug(tier), "partition": PARTITION_LABELS.get(partition, partition),
-        "fleet_noun": FLEET_NOUNS.get(partition, "équipements"),
+        "asset": partition, "fleet_noun": FLEET_NOUNS.get(partition, "équipements"),
         "frequency": int(row["frequency"]), "total_cost": float(row["total_cost_eur"]),
         "mean_cost": float(row["mean_cost_eur"]), "downtime": float(row["total_downtime_hours"]),
         "cost_share": float(row["total_cost_eur"]) / fleet_cost if fleet_cost else 0.0,
@@ -318,11 +317,13 @@ def _target_rows(plan: list[dict], inc: pd.DataFrame) -> list[dict]:
                 col = EQUIPMENT_COL if a["scope"] == "equipment" else "site"
                 own = members[members[col].astype(str) == t["name"]]
                 row = rows.setdefault(key, {
-                    "name": t["name"], "kind": SCOPE_LABELS.get(a["scope"], a["scope"]), "site": "",
+                    "name": t["name"], "kind": SCOPE_LABELS.get(a["scope"], a["scope"]),
+                    "site": "" if a["scope"] == "equipment" else t["name"], "asset": v["asset"],
                     "voies": {}, "actions": [], "escalation": False, "to_verify": False})
                 if a["scope"] == "equipment" and not row["site"]:
                     sites = inc.loc[inc[EQUIPMENT_COL].astype(str) == t["name"], "site"]
                     row["site"] = _s(sites.iloc[0]) if len(sites) else ""
+                row["site_slug"] = _slug(row["site"])
                 row["voies"][v["id"]] = (float(own[COST_COL].sum()), len(own))
                 row["escalation"] |= t["escalation"]
                 row["to_verify"] |= t["to_verify"]
@@ -332,6 +333,7 @@ def _target_rows(plan: list[dict], inc: pd.DataFrame) -> list[dict]:
                                                    "n": len(own), "cost": float(own[COST_COL].sum())}]})
     out = []
     for row in rows.values():
+        row["is_site"] = row["kind"] == SCOPE_LABELS["site"]
         row["cost"] = sum(c for c, _ in row["voies"].values())
         row["n"] = sum(n for _, n in row["voies"].values())
         row["actions"].sort(key=lambda x: (not x["target"]["escalation"], -x["cost"]))
@@ -362,31 +364,62 @@ def _number_actions(target_rows: list[dict], fleet: list[dict]) -> int:
     return n
 
 
-# --------------------------------------------------------------------------- page méthode
+# --------------------------------------------------------------------------- synthèse et vue flotte
 
 
-def _fleet_charts(data: dict, fleet_cost: float, main_name: str) -> dict:
+def _summary(data: dict, fleet_cost: float) -> dict:
+    """Onglet Synthèse : chiffres clés, coût mensuel par type d'actif, segmentation des problèmes
+    (tous les groupes, sans les actions) et son Pareto."""
+    inc = data["incidents"]
+    groups = sorted(inc[PARTITION_COL].astype(str).unique())
+    months = pd.to_datetime(inc[DATE_COL], errors="coerce").dt.to_period("M")
+    monthly = inc.assign(month=months).groupby(["month", PARTITION_COL])[COST_COL].sum().unstack(fill_value=0.0)
+    if len(monthly):
+        monthly = monthly.reindex(pd.period_range(monthly.index.min(), monthly.index.max(), freq="M"), fill_value=0.0)
+    series = [{"label": PARTITION_LABELS.get(g, g), "cat": i + 1,
+               "points": [(m, float(monthly.at[m, g])) for m in monthly.index] if g in monthly else []}
+              for i, g in enumerate(groups)]
+    by_asset = inc.groupby(PARTITION_COL)[COST_COL].sum()
+
     merged = data["merged"].sort_values("criticality_rank")
-    nominal = merged["nominal"].map(_truthy)
     rows, cum = [], 0.0
-    for r, is_nom in zip(merged.to_dict("records"), nominal):
-        cum += float(r["total_cost_eur"])
+    for r in merged.to_dict("records"):
+        cost = float(r["total_cost_eur"])
+        cum += cost
         tier = _s(r["criticality_tier"])
         mid = str(r["merged_cluster_id"])
-        anchor = "sans-action" if is_nom or mid == OUTLIER_LABEL else f"voie-{mid}"
-        rows.append({"title": _s(r["problem_title"]) or mid, "cost": float(r["total_cost_eur"]),
+        partition = _s(r.get("partition"))
+        status = "isolés" if mid == OUTLIER_LABEL else ("nominal" if _truthy(r.get("nominal")) else "")
+        rows.append({"title": _s(r["problem_title"]) or mid, "description": _s(r.get("problem_description")),
+                     "asset": PARTITION_LABELS.get(partition, partition), "n": int(r["frequency"]), "cost": cost,
+                     "share": cost / fleet_cost if fleet_cost else 0.0,
                      "cum_share": cum / fleet_cost if fleet_cost else 0.0, "tier": tier, "tier_slug": _slug(tier),
-                     "href": f"{main_name}#{anchor}"})
+                     "status": status, "href": "#sans-action" if mid == OUTLIER_LABEL else f"#voie-{mid}"})
+    tiers = [{"label": t, "slug": _slug(t)} for t in TIER_ORDER if t in set(merged["criticality_tier"].astype(str))]
+    return {"monthly_svg": charts.monthly_svg(series), "pareto_svg": charts.pareto_svg(rows), "groups": rows,
+            "tiers": tiers, "n_groups": int((merged["merged_cluster_id"] != OUTLIER_LABEL).sum()),
+            "assets": [{"label": s["label"], "cat": s["cat"], "cost": float(by_asset.get(g, 0.0)),
+                        "share": float(by_asset.get(g, 0.0)) / fleet_cost if fleet_cost else 0.0}
+                       for g, s in zip(groups, series)]}
+
+
+def _site_chart(data: dict) -> dict:
     inc = data["incidents"]
     groups = sorted(inc[PARTITION_COL].astype(str).unique())
     by_site = (inc.groupby(["site", PARTITION_COL]).agg(cost=(COST_COL, "sum"), n=(ID_COL, "size"))
                .reset_index().sort_values("cost", ascending=False))
     site_rows = [{"site": r["site"], "group": str(r[PARTITION_COL]), "cost": float(r["cost"]), "n": int(r["n"])}
                  for r in by_site.to_dict("records")]
-    tiers = [{"label": t, "slug": _slug(t)} for t in TIER_ORDER if t in set(merged["criticality_tier"].astype(str))]
-    return {"pareto_svg": charts.pareto_svg(rows), "site_svg": charts.site_svg(site_rows, groups),
-            "groups": [{"label": PARTITION_LABELS.get(g, g), "cat": i + 1} for i, g in enumerate(groups)],
-            "tiers": tiers}
+    return {"site_svg": charts.site_svg(site_rows, groups),
+            "groups": [{"label": PARTITION_LABELS.get(g, g), "cat": i + 1} for i, g in enumerate(groups)]}
+
+
+def _filters(inc: pd.DataFrame) -> dict:
+    """Valeurs des filtres type d'actif et site (onglets d'actions), dans l'ordre alphabétique."""
+    assets = sorted(inc[PARTITION_COL].astype(str).unique())
+    sites = inc.groupby("site")[PARTITION_COL].first().astype(str)
+    return {"assets": [{"key": a, "label": PARTITION_LABELS.get(a, a)} for a in assets],
+            "sites": [{"slug": _slug(s), "name": s, "asset": a} for s, a in sites.items()]}
 
 
 def _quality(plan: list[dict]) -> dict:
@@ -479,8 +512,11 @@ def build_context(data: dict, out_path: Path, root: Path) -> dict:
     return {
         "header": header, "targets": targets, "fleet": fleet, "plan": plan, "n_actions": n_actions,
         "targets_cost": sum(r["cost"] for r in targets), "no_action": no_action,
-        "urgency_escalation": URGENCY_ESCALATION, "main_name": out_path.name, "method_name": METHOD_NAME,
-        "charts": _fleet_charts(data, fleet_cost, out_path.name),
+        "urgency_escalation": URGENCY_ESCALATION, "summary": _summary(data, fleet_cost),
+        "site_chart": _site_chart(data), "filters": _filters(inc),
+        "tabs": [{"id": "synthese", "label": "Synthèse"}, {"id": "ciblees", "label": "Actions ciblées"},
+                 {"id": "flotte", "label": "Programmes flotte"}, {"id": "preuves", "label": "Preuves"},
+                 {"id": "sans-action", "label": "Sans action"}, {"id": "methode", "label": "Méthode"}],
         "quality": _quality(plan), "method": _method(data, len(plan)),
     }
 
@@ -497,8 +533,8 @@ def _environment() -> Environment:
     return env
 
 
-def render(ctx: dict, template: str = "rapport.html.j2") -> str:
-    return _environment().get_template(template).render(**ctx)
+def render(ctx: dict) -> str:
+    return _environment().get_template("rapport.html.j2").render(**ctx)
 
 
 def build_report(
@@ -507,17 +543,15 @@ def build_report(
     root: Path | str | None = None,
     diag_dir: Path | str | None = None,
 ) -> Path:
-    """Écrit le rapport (`out_path`) et la page méthode (`methode.html` à côté). `root` : racine à
-    laquelle `document_path` est relatif (défaut : répertoire courant)."""
+    """Écrit le rapport à onglets (`out_path`). `root` : racine à laquelle `document_path` est
+    relatif (défaut : répertoire courant)."""
     out_path = Path(out_path)
     root = Path(root) if root is not None else Path.cwd()
     data = load_outputs(Path(seg_dir), diag_dir)
     ctx = build_context(data, out_path, root)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(render(ctx), encoding="utf-8")
-    method_path = out_path.parent / METHOD_NAME
-    method_path.write_text(render(ctx, "methode.html.j2"), encoding="utf-8")
-    print(f"   [OK] Rapport : {out_path} ({out_path.stat().st_size / 1024:.0f} Ko) ; méthode : {method_path}")
+    print(f"   [OK] Rapport : {out_path} ({out_path.stat().st_size / 1024:.0f} Ko)")
     return out_path
 
 

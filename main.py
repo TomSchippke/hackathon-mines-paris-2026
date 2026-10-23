@@ -4,8 +4,7 @@
   2. topics        topic modeling BERTopic sur tous les incidents     -> outputs/topics/ (optionnel)
   3. segmentation  clustering agentique des incidents                 -> outputs/segmentation/
   4. equipment     analyse par équipement                             -> outputs/equipment/
-  5. report        rapport opérationnel HTML statique                 -> outputs/rapport_operationnel.html
-                                                                        + outputs/methode.html
+  5. report        rapport opérationnel HTML statique à onglets       -> outputs/rapport_operationnel.html
 
 Chaque étape met ses résultats en cache dans outputs/cache/ : relancer ne refait que ce qui a
 changé (nouveaux PDF, nouveaux textes).
