@@ -109,12 +109,16 @@ restent à l'intérieur d'une partition.
       au moins `NOMINAL_MIN_MILD_SHARE` (80 %) de ses incidents sont au niveau de sévérité le plus bas.
       Un cluster nominal n'a pas de recommandation. Les prompts ne donnent aucun exemple de défaut ni de
       condition extérieure : les exemples tirés des résultats orienteraient la réponse ;
-    - **critique des recommandations** (clusters non nominaux) : un appel relit chaque recommandation
-      (`keep`, `rewrite` ou `drop`) et doit nommer un composant et une action. Le critique ne peut pas
-      changer la portée ni les cibles. Une recommandation sans composant ou sans action est écartée ;
-      si toutes le sont, la recommandation de repli est « Aucune action spécifique identifiée :
-      inspecter pour établir la cause. ». En cas d'erreur de l'API, les recommandations sont gardées avec
-      `critic_verdict` = `non_verifie` ;
+    - **contrôle des recommandations par le code** (clusters non nominaux) : le LLM remplit trois
+      champs courts (`verbe`, `composant`, `detail` de 12 mots au plus) et le code construit la phrase.
+      Une action est refusée si le verbe n'est pas un infinitif ou figure dans une liste de verbes
+      génériques, si le composant est vague, ou s'il n'est retrouvé dans aucun rapport du cluster (mots
+      pleins, pluriel toléré). Ces listes restent dans le code, jamais dans le prompt, qui ne donne
+      aucun exemple de composant. Les actions refusées sont renvoyées une fois au LLM avec la raison
+      (`action_retry`, seuls verbe, composant et détail peuvent changer) ; refusées à nouveau, elles
+      sont écartées. Sans action restante, la recommandation de repli est « Aucune action spécifique
+      identifiée : inspecter pour établir la cause. ». `critic_verdict` vaut `valide`, `corrigee` ou
+      `fallback` ; les doublons (verbe, composant, portée) sont fusionnés ;
     - **ordre** des recommandations : escalade, puis ciblées (site, équipement), puis flotte.
 12. **Criticité** (`criticality.py`) : classement des clusters fusionnés par **coût total décroissant**,
     isolés inclus. Les paliers sont Pareto sur le coût total cumulé : Critique jusqu'à 70 %, Élevée
@@ -140,7 +144,7 @@ Dossier `outputs/segmentation/` (schémas détaillés dans le [README racine](..
 |---|---|---|
 | `incidents_segmented.csv` | incident | `fine_cluster_id`, `merged_cluster_id`, `cluster_id`, `problem_title`, `common_cause`, `cluster_criticality_tier`, `assignment_source` (`dense_cluster`, `merged_singleton`, `unclassified_outlier`) |
 | `clusters_fine.csv` | cluster fin (singletons non fusionnés inclus, `merged_cluster_id` = `isole_atypique`) | `fine_cluster_id`, `partition`, `merged_cluster_id`, `size`, `fine_title`, `failure_mode`, `keywords` |
-| `clusters_merged.csv` | cluster fusionné | `merged_cluster_id`, `fine_cluster_ids`, criticité, fréquence, coûts, durées, diagnostic, `common_cause_quotes`, `prevented_outcomes`, `recommendations`, `early_warning_rules` (listes JSON), `common_cause_source` (`citee`, `inferee`), `nominal`, `nominal_proposed`, `nominal_reason`, `nominal_external_condition`, `nominal_external_quote` ; chaque recommandation porte `scope`, `targets`, `target_reason`, `targets_to_verify`, `component`, `confirm_cause_first`, `critic_verdict` |
+| `clusters_merged.csv` | cluster fusionné | `merged_cluster_id`, `fine_cluster_ids`, criticité, fréquence, coûts, durées, diagnostic, `common_cause_quotes`, `recommendations` (listes JSON), `common_cause_source` (`citee`, `inferee`), `nominal`, `nominal_proposed`, `nominal_reason`, `nominal_external_condition`, `nominal_external_quote` ; chaque recommandation porte `action` (phrase construite par le code), `verb`, `component`, `detail`, `scope`, `targets`, `target_reason`, `targets_to_verify`, `confirm_cause_first`, `critic_verdict` |
 | `merge_log.json` | décision de fusion | `round`, `action`, `members`, `shared_remediation`, `prevented_outcomes`, `dbcv_before`, `dbcv_after`, `vetoed`, `critic_verdict` |
 | `concentration.csv` | cluster × dimension × valeur | `dimension` (`site`, `equipment_id`, `period`), `observed`, `expected`, `lift`, `p_value`, `q_value`, `significant`, `evidence_level` (`forte`, `à vérifier`, vide si non significatif) |
 | `precursor_pairs.csv` | paire × fenêtre | `kind` (`precursor`, `recurrence`), `antecedent`, `consequent`, `window_days`, `n_hits`, `n_equipments`, `lift`, `q_value`, `is_best_window`, `significant`, `plausible`, `mechanism`, `monitoring_rule` |
@@ -208,10 +212,12 @@ Chiffres mesurés sur la dernière exécution (sorties actuelles).
     qui est un symptôme machine plutôt qu'une condition extérieure ; la citation étant authentique, le
     contrôle la laisse passer. Au total 2 clusters nominaux sur 29 (l'autre : `solar_M3`, « tempête ou
     grêle »).
-  - *Actions génériques.* Une action générique passe le critique dès qu'elle nomme un composant, par
-    exemple sur des cibles d'escalade : « effectuer une inspection approfondie et une maintenance
-    préventive » (SUD1-WTG04), « surveiller et intervenir en cas d'anomalies » (NORD2-WTG02). Sur 36
-    recommandations, 29 sont réécrites par le critique, 6 conservées, 1 en repli.
+  - *Actions génériques.* Run du 23/10/2026 (contrôle par le code) : sur 50 recommandations, 45
+    acceptées du premier coup, 4 après relance, 1 en repli. Le contrôle vérifie que le composant existe
+    dans les rapports, pas que l'action soit la bonne : « Installer surface de la pale » passe.
+  - *Escalades peu reprises.* Le LLM ne retient que 2 des 20 séries en escalade comme cibles
+    (SUD1-WTG08, OUEST1-INV07). Le rapport ajoute donc, par le code, une action de veille
+    (« Inspecter l'équipement ») pour chaque série qu'aucune action ne vise (18 sur ce run).
   - *Cause commune.* Les 29 clusters (hors `isole_atypique`) ont une cause citée, aucune inférée.
 - **Coût des singletons.** Chaque singleton coûte un appel LLM d'étiquetage (15 au taux d'isolés
   actuel, ~1 % : 3 rattachés à un cluster, 12 isolés) ; un réglage sélectionné avec un fort taux d'isolés en coûterait des centaines
@@ -235,7 +241,7 @@ Tests dans `tests/` (sans réseau ni LLM, le LLM est simulé), lancés par
 | `test_escalation.py` | veille d'escalade : série plantée retrouvée, cas exclus (sévérité qui baisse, moins de 3 incidents, isolés), pas de contamination entre séries, classement par coût, entrée vide, sévérité inconnue |
 | `test_precursors.py` | **injection synthétique** : un précurseur planté dans des données aléatoires doit ressortir significatif, un cluster sans structure (ou une machine « citron ») ne doit pas l'être ; règle de sévérité, récurrences séparées (plus de type escalade), nombre d'occurrences identique à un calcul naïf, durée d'exécution |
 | `test_precursor_agent.py` | contrôle de plausibilité : réponses valides, mal formées, exceptions, seules les paires significatives sont envoyées |
-| `test_diagnosis.py` | diagnostic validé : cibles et règles inventées supprimées, périmètre des prompts borné, cibles d'escalade et `target_reason`, ordre escalade → ciblées → flotte, critique (réécriture sans changer portée ni cibles, repli si tout est écarté, `non_verifie` en cas d'erreur), citations vérifiées dans les rapports (accents et ponctuation tolérés), relance de la cause (30 rapports au plus) puis cause `inferee`, nominal exigeant condition extérieure citée et sévérité minimale |
+| `test_diagnosis.py` | diagnostic validé : cibles inventées supprimées, périmètre des prompts borné, cibles d'escalade et `target_reason`, ordre escalade → ciblées → flotte, contrôle des actions par le code (verbe générique, composant vague ou absent des rapports, relance unique sans changer portée ni cibles, repli si tout est écarté, doublons fusionnés, phrase construite par le code), citations vérifiées dans les rapports (accents et ponctuation tolérés), relance de la cause (30 rapports au plus) puis cause `inferee`, nominal exigeant condition extérieure citée et sévérité minimale |
 | `test_equipment_metrics.py` | chronologie par équipement (écarts inter-pannes), agrégats, score « bad actor » fondé sur le seul coût et les seules heures d'arrêt (module `equipment_analysis`) |
 | `test_pipeline_smoke.py` | exécution complète sur un échantillon de 200 incidents avec LLM et embeddings simulés : tous les fichiers de sortie existent avec leurs colonnes ; `clusters_summary.csv` n'est pas produit ; plus de reclassement des isolés ni de colonne `scope_cluster` ; `escalations.csv` présent ; colonnes obligatoires manquantes → erreur explicite |
 

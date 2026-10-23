@@ -1,4 +1,4 @@
-"""Point d'entrée CLI : python -m report [--summary template|llm]."""
+"""Point d'entrée CLI : python -m report [--seg-dir ...] [--out ...]."""
 
 from .build import main
 

@@ -1,0 +1,21 @@
+{#- Macros partagées par le rapport et la page méthode. -#}
+{% macro incident(r) -%}
+{% if r.href -%}
+<a class="inc" href="{{ r.href }}" title="{{ r.date|date_fr }} · {{ r.severity }} · {{ r.cost|eur }}">#{{ r.id }}</a>
+{%- else -%}
+<details class="inc"><summary title="Pas de PDF : texte du CSV">#{{ r.id }}</summary><div class="inc-text"><p class="muted">{{ r.date|date_fr }} · {{ r.equipment }} · {{ r.severity }} · {{ r.cost|eur }}</p><p>{{ r.text }}</p></div></details>
+{%- endif %}
+{%- endmacro %}
+
+{% macro incidents(list) -%}
+<div class="incs">{% for r in list %}{{ incident(r) }}{% endfor %}</div>
+{%- endmacro %}
+
+{#- Texte d'une action : verbe en gras, composant, détail -#}
+{% macro action_text(a) -%}
+<span class="act"><b>{{ a.verb }}</b>{% if a.component %} {{ a.component }}{% endif %}{% if a.detail %}<span class="act-detail"> — {{ a.detail }}</span>{% endif %}</span>
+{%- endmacro %}
+
+{% macro badges(a) -%}
+{% for b in a.badges %}<span class="badge {{ b.slug }}">{{ b.label }}</span>{% endfor %}
+{%- endmacro %}

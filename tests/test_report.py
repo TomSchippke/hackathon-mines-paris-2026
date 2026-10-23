@@ -10,9 +10,10 @@ import pandas as pd
 import pytest
 
 from agentic_pipeline.config import OUTLIER_LABEL
-from report.build import ALT_NAME, build_report
+from report.build import METHOD_NAME, build_report
 
-SECTIONS = ["Synthèse", "Vue flotte", "Plan d'action", "Sans action requise", "Méthode et limites"]
+SECTIONS = ["Actions ciblées", "Programmes flotte", "Preuves par groupe", "Sans action requise"]
+METHOD_SECTIONS = ["Construction", "Vue flotte", "Qualité des actions", "Résultats négatifs", "Limites"]
 TEXT = {1: "Le roulement principal présente une usure avancée du chemin de roulement.",
         2: "Le roulement principal a surchauffé, usure avancée du chemin de roulement constatée.",
         3: "Usure avancée du chemin de roulement sur le roulement principal, remplacement.",
@@ -23,10 +24,12 @@ TEXT = {1: "Le roulement principal présente une usure avancée du chemin de rou
         8: "Incident singulier sans rapport avec les autres groupes."}
 
 
-def _rec(action, scope="fleet", targets=(), reason=None, verify=(), verdict="keep", confirm=False):
-    return {"action": action, "component": "composant", "scope": scope, "targets": list(targets),
-            "target_reason": reason or {}, "targets_to_verify": list(verify), "rationale": "",
-            "confirm_cause_first": confirm, "critic_verdict": verdict}
+def _rec(verb, component, detail="", scope="fleet", targets=(), reason=None, verify=(), verdict="valide",
+         confirm=False):
+    return {"action": f"{verb} {component}", "verb": verb, "component": component, "detail": detail,
+            "scope": scope, "targets": list(targets), "target_reason": reason or {},
+            "targets_to_verify": list(verify), "rationale": "", "confirm_cause_first": confirm,
+            "critic_verdict": verdict}
 
 
 def _merged_row(mid, rank, tier, freq, cost, title, fine_ids, recs, nominal=False, quotes=(), source="citee", **kw):
@@ -35,8 +38,7 @@ def _merged_row(mid, rank, tier, freq, cost, title, fine_ids, recs, nominal=Fals
            "total_cost_eur": cost, "mean_downtime_hours": 1.0, "total_downtime_hours": 2.0 * freq,
            "problem_title": title, "problem_description": f"Description {title}.", "common_cause": f"Cause {title}.",
            "common_cause_quotes": json.dumps(list(quotes), ensure_ascii=False), "common_cause_source": source,
-           "system_impact": "", "prevented_outcomes": json.dumps(["Panne évitée"]),
-           "recommendations": json.dumps(recs, ensure_ascii=False), "early_warning_rules": "[]",
+           "recommendations": json.dumps(recs, ensure_ascii=False),
            "nominal": nominal, "nominal_proposed": nominal, "nominal_reason": "", "nominal_external_condition": "",
            "nominal_external_quote": ""}
     row.update(kw)
@@ -45,10 +47,9 @@ def _merged_row(mid, rank, tier, freq, cost, title, fine_ids, recs, nominal=Fals
 
 @pytest.fixture
 def fixture_dirs(tmp_path: Path) -> dict:
-    """Arborescence minimale : outputs/segmentation, outputs/equipment ; PDF pour les incidents impairs."""
-    seg, eq = tmp_path / "outputs" / "segmentation", tmp_path / "outputs" / "equipment"
+    """Arborescence minimale : outputs/segmentation ; PDF pour les incidents impairs."""
+    seg = tmp_path / "outputs" / "segmentation"
     seg.mkdir(parents=True)
-    eq.mkdir(parents=True)
     labels = {1: ("wind_F0", "wind_M0"), 2: ("wind_F0", "wind_M0"), 3: ("wind_F0", "wind_M0"),
               4: ("wind_F1", "wind_M1"), 5: ("wind_F1", "wind_M1"),
               6: ("wind_F2", "wind_M2"), 7: ("wind_F2", "wind_M2"), 8: ("wind_O0", OUTLIER_LABEL)}
@@ -63,17 +64,20 @@ def fixture_dirs(tmp_path: Path) -> dict:
     pd.DataFrame(rows).to_csv(seg / "incidents_segmented.csv", index=False)
     merged = [
         _merged_row("wind_M0", 1, "Critique", 3, 6000.0, "Usure du roulement principal", ["wind_F0"],
-                    [_rec("Remplacer le roulement principal de WTG01", "equipment", ["WTG01"], {"WTG01": "both"}),
-                     _rec("Graisser les roulements de la flotte")],
+                    [_rec("Remplacer", "roulement principal", "chemin de roulement usé", "equipment", ["WTG01"],
+                          {"WTG01": "both"}),
+                     _rec("Graisser", "roulements")],
                     quotes=["usure avancée du chemin de roulement"]),
         _merged_row("wind_M1", 2, "Élevée", 2, 9000.0, "Gaine de câble fissurée", ["wind_F1"],
-                    [_rec("Remplacer les câbles du Parc A", "site", ["Parc A"], {"Parc A": "concentration"},
-                          verify=["Parc A"], verdict="non_verifie", confirm=True)], source="inferee"),
+                    [_rec("Remplacer", "câble d'alimentation", "", "site", ["Parc A"], {"Parc A": "concentration"},
+                          verify=["Parc A"], verdict="corrigee", confirm=True),
+                     {**_rec("", ""), "action": "Aucune action spécifique identifiée : inspecter pour établir la cause.",
+                      "verdict": "", "critic_verdict": "fallback"}], source="inferee"),
         _merged_row("wind_M2", 3, "Moyenne", 2, 13000.0, "Protection sur rafale", ["wind_F2"], [], nominal=True,
                     nominal_reason="Protection seule.", nominal_external_condition="rafale de vent",
                     nominal_external_quote="rafale de vent la protection"),
         _merged_row(OUTLIER_LABEL, 4, "Faible", 1, 8000.0, "Incidents isolés et anomalies atypiques", [],
-                    [_rec("Maintien d'une veille opérationnelle.", verdict="fallback")]),
+                    [{**_rec("", ""), "action": "Maintien d'une veille opérationnelle.", "critic_verdict": "fallback"}]),
     ]
     pd.DataFrame(merged).to_csv(seg / "clusters_merged.csv", index=False)
     pd.DataFrame([
@@ -103,17 +107,14 @@ def fixture_dirs(tmp_path: Path) -> dict:
                    "window_days": 30, "n_hits": 5, "n_equipments": 3, "n_consequent": 3, "expected_hits": 4.0,
                    "lift": 1.2, "p_value": 0.3, "q_value": 0.6, "is_best_window": True, "significant": False,
                    "plausible": False, "mechanism": "", "monitoring_rule": ""}]).to_csv(seg / "precursor_pairs.csv", index=False)
-    pd.DataFrame([{"equipment_id": "WTG01", "site": "Parc A", "asset_type": "wind", "total_incidents": 3,
-                   "total_cost_eur": 6000.0, "total_downtime_hours": 6.0, "mtbf_days": 30.0, "bad_actor_score": 90.0,
-                   "most_frequent_problem": "Usure du roulement principal"}]).to_csv(eq / "equipment_summary.csv", index=False)
     # Seul le PDF de l'incident 1 est présent sur le disque ; ceux des autres incidents impairs manquent
     (tmp_path / "data" / "pdf_scan").mkdir(parents=True)
     (tmp_path / "data" / "pdf_scan" / "incident_1.pdf").write_bytes(b"%PDF-1.4\n")
-    return {"root": tmp_path, "seg": seg, "eq": eq, "out": tmp_path / "outputs" / "rapport_operationnel.html"}
+    return {"root": tmp_path, "seg": seg, "out": tmp_path / "outputs" / "rapport_operationnel.html"}
 
 
 def _build(d: dict, **kw) -> str:
-    path = build_report(d["seg"], d["eq"], d["out"], root=d["root"], **kw)
+    path = build_report(d["seg"], d["out"], root=d["root"], **kw)
     return path.read_text(encoding="utf-8")
 
 
@@ -123,26 +124,65 @@ def _section(html: str, anchor: str) -> str:
     return m.group(1)
 
 
+def _method(d: dict) -> str:
+    return (d["out"].parent / METHOD_NAME).read_text(encoding="utf-8")
+
+
 def test_sections_and_no_external_resources(fixture_dirs, no_llm):
     html = _build(fixture_dirs)
     assert 'id="entete"' in html
     for title in SECTIONS:
         assert f"<h2>{title}</h2>" in html.replace("&#39;", "'")
-    assert "http" not in html and "<script" not in html
-    assert (fixture_dirs["out"].parent / ALT_NAME).exists()
+    method = _method(fixture_dirs)
+    for title in METHOD_SECTIONS:
+        assert f"<h2>{title}</h2>" in method
+    for page in (html, method):
+        assert "http" not in page and "<script" not in page
+    assert not (fixture_dirs["out"].parent / "rapport_synthese_alt.html").exists()
+    assert "Synthèse" not in html and "bad actor" not in html
 
 
-def test_template_summary_refs_are_anchors(fixture_dirs, no_llm):
+def test_targets_ranked_by_own_cost_with_escalation(fixture_dirs, no_llm):
+    targets = _section(_build(fixture_dirs), "ciblees")
+    # WTG01 : incidents 1-3 du groupe wind_M0 (6 000 €) ; Parc A : incident 4 du groupe wind_M1 (4 000 €)
+    assert targets.index("WTG01") < targets.index("Parc A")
+    assert "6 000 €" in targets and "4 000 €" in targets
+    assert "9 000" not in targets  # coût du groupe wind_M1, jamais affiché pour la cible
+    assert "agir avant la prochaine occurrence" in targets and 'class="escalating"' in targets
+    assert "<b>Remplacer</b> roulement principal" in targets and "chemin de roulement usé" in targets
+    for label in ("escalade", "concentration", "à vérifier", "cause inférée – à confirmer"):
+        assert label in targets
+    assert "équipement · Parc A" in targets
+
+
+def test_fleet_programmes(fixture_dirs, no_llm):
+    fleet = _section(_build(fixture_dirs), "flotte")
+    assert "<b>Graisser</b> roulements" in fleet and "Sur l'ensemble des éoliennes du parc" in fleet
+    assert "action par défaut" in fleet and "inspecter pour établir la cause" in fleet
+    assert "Remplacer</b> roulement" not in fleet  # action ciblée absente des programmes
+
+
+def test_action_ids_reading_order_and_backlinks(fixture_dirs, no_llm):
     html = _build(fixture_dirs)
-    synth = _section(html, "synthese")
-    refs = set(re.findall(r'href="#(A\d+)"', synth))
-    assert refs, "la synthèse cite au moins une action"
-    for ref in refs:
+    ids = re.findall(r'id="(A\d+)"', html)
+    assert ids == ["A1", "A2", "A3", "A4"]  # ciblées (WTG01, Parc A), puis programmes flotte
+    proofs = _section(html, "preuves")
+    for ref in set(re.findall(r'href="#(A\d+)"', proofs)):
         assert f'id="{ref}"' in html
-    for href in re.findall(r'href="#([^"]+)"', synth):
-        assert f'id="{href}"' in html
-    # l'escalade de WTG01 est citée et ordonnée en premier dans sa voie
-    assert "WTG01" in synth and "agir avant la prochaine occurrence" in synth
+    for anchor in re.findall(r'href="#(voie-[^"]+)"', html):
+        assert f'id="{anchor}"' in html
+
+
+def test_action_with_two_targets_anchored_once(fixture_dirs, no_llm):
+    path = fixture_dirs["seg"] / "clusters_merged.csv"
+    merged = pd.read_csv(path)
+    recs = json.loads(merged.loc[0, "recommendations"])
+    recs[0]["targets"], recs[0]["target_reason"] = ["WTG01", "WTG02"], {"WTG01": "both", "WTG02": "escalation"}
+    merged.loc[0, "recommendations"] = json.dumps(recs, ensure_ascii=False)
+    merged.to_csv(path, index=False)
+    html = _build(fixture_dirs)
+    assert html.count('id="A1"') == 1
+    assert _section(html, "ciblees").count('<span class="aid">A1</span>') == 2
 
 
 def test_incident_links_relative_and_inline_text(fixture_dirs, no_llm):
@@ -156,54 +196,50 @@ def test_incident_links_relative_and_inline_text(fixture_dirs, no_llm):
     assert "<summary" in html and "a surchauffé, usure avancée" in html
 
 
-def test_badges_and_grounding(fixture_dirs, no_llm):
-    plan = _section(_build(fixture_dirs), "plan")
-    for label in ("escalade", "concentration", "à vérifier", "cause inférée – à confirmer", "non vérifié par le critique"):
-        assert label in plan
-    assert "lift 2,0" in plan and "q&nbsp;=&nbsp;0,080" in plan.replace(" ", "&nbsp;")
-    assert "<svg" in plan  # frise de la série en escalade
-    assert "Usure du chemin de roulement" in plan  # mode de défaillance couvert
+def test_evidence_sheets(fixture_dirs, no_llm):
+    proofs = _section(_build(fixture_dirs), "preuves")
+    assert "lift 2,0" in proofs and "q&nbsp;=&nbsp;0,080" in proofs.replace(" ", "&nbsp;")
+    assert "<svg" in proofs  # frise de la série en escalade
+    assert "Usure du chemin de roulement" in proofs  # mode de défaillance couvert
+    assert "usure avancée du chemin de roulement" in proofs  # citation
+    for removed in ("Défaillances évitées", "Panne évitée", "Règles d'alerte", "Impact"):
+        assert removed not in proofs
 
 
-def test_nominal_and_isolated_not_in_plan(fixture_dirs, no_llm):
+def test_nominal_and_isolated_not_in_tables(fixture_dirs, no_llm):
     html = _build(fixture_dirs)
-    plan, none = _section(html, "plan"), _section(html, "sans-action")
-    assert "Protection sur rafale" not in plan and "Protection sur rafale" in none
+    tables = _section(html, "ciblees") + _section(html, "flotte") + _section(html, "preuves")
+    none = _section(html, "sans-action")
+    assert "Protection sur rafale" not in tables and "Protection sur rafale" in none
     assert "rafale de vent" in none
-    assert "Incidents isolés et anomalies atypiques" not in plan
-    assert "Maintien d" not in plan  # action de repli des isolés absente du plan
+    assert "Incidents isolés et anomalies atypiques" not in tables
+    assert "Maintien d" not in tables
     assert "#8" in none
-    assert re.findall(r'id="(A\d+)"', plan) == ["A1", "A2", "A3"]
 
 
-def test_llm_summary_filters_invented_ids(fixture_dirs, no_llm):
-    calls = []
-
-    def fake_llm(system_prompt, user_prompt, cache_tag):
-        calls.append(cache_tag)
-        assert "A1" in user_prompt and "A3" in user_prompt
-        return {"sentences": [
-            {"text": "Remplacer le roulement de WTG01.", "action_ids": ["A1"]},
-            {"text": "Graisser la flotte (actions : [A2]).", "action_ids": ["A2"]},
-            {"text": "Remplacer les câbles du Parc A.", "action_ids": ["A3", "A1"]},
-            {"text": "Action inventée.", "action_ids": ["A99"]},
-            {"text": "Phrase sans action.", "action_ids": []},
-        ]}
-
-    synth = _section(_build(fixture_dirs, summary="llm", llm=fake_llm), "synthese")
-    assert calls == ["report_summary"]
-    assert "Remplacer le roulement de WTG01." in synth
-    assert "Graisser la flotte." in synth and "[A2]" not in synth  # identifiants recopiés retirés du texte
-    assert "Action inventée" not in synth and "A99" not in synth and "Phrase sans action" not in synth
-    alt = (fixture_dirs["out"].parent / ALT_NAME).read_text(encoding="utf-8")
-    assert "déterministe" in alt and "rapport_operationnel.html#" in alt
+def test_method_page_quality_and_charts(fixture_dirs, no_llm):
+    _build(fixture_dirs)
+    method = _method(fixture_dirs)
+    quality = _section(method, "qualite")
+    # 4 actions au plan : 2 valides, 1 corrigée, 1 par défaut
+    assert re.search(r"<b class=\"num\">2</b><span>acceptées du premier coup", quality)
+    assert re.search(r"<b class=\"num\">1</b><span>acceptées après relance", quality)
+    assert "actions par défaut (25" in quality
+    assert "1/2</b><span>causes citées" in quality
+    assert "<svg" in _section(method, "vue-flotte") and "rapport_operationnel.html#voie-wind_M0" in method
+    assert "Sur ce run" not in method
 
 
-def test_llm_summary_falls_back_below_three_sentences(fixture_dirs, no_llm):
-    def fake_llm(system_prompt, user_prompt, cache_tag):
-        return {"sentences": [{"text": "Une seule phrase valide.", "action_ids": ["A1"]},
-                              {"text": "Invention.", "action_ids": ["A42"]}]}
-
-    synth = _section(_build(fixture_dirs, summary="llm", llm=fake_llm), "synthese")
-    assert "Une seule phrase valide" not in synth
-    assert "repli sur le gabarit" in synth and "agir avant la prochaine occurrence" in synth
+def test_every_escalation_series_gets_a_row(fixture_dirs, no_llm):
+    path = fixture_dirs["seg"] / "clusters_merged.csv"
+    merged = pd.read_csv(path)
+    recs = json.loads(merged.loc[0, "recommendations"])
+    merged.loc[0, "recommendations"] = json.dumps(recs[1:], ensure_ascii=False)  # plus d'action sur WTG01
+    merged.to_csv(path, index=False)
+    html = _build(fixture_dirs)
+    targets = _section(html, "ciblees")
+    assert "WTG01" in targets and "<b>Inspecter</b> l&#39;équipement" in targets
+    assert "ajoutée par le code" in targets and "agir avant la prochaine occurrence" in targets
+    assert "<svg" in _section(html, "preuves")  # la frise reste dans la fiche
+    quality = _section(_method(fixture_dirs), "qualite")
+    assert "1 série en escalade" in quality and "1</b><span>acceptées du premier coup" in quality

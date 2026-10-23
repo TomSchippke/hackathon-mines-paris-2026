@@ -5,6 +5,7 @@
   3. segmentation  clustering agentique des incidents                 -> outputs/segmentation/
   4. equipment     analyse par équipement                             -> outputs/equipment/
   5. report        rapport opérationnel HTML statique                 -> outputs/rapport_operationnel.html
+                                                                        + outputs/methode.html
 
 Chaque étape met ses résultats en cache dans outputs/cache/ : relancer ne refait que ce qui a
 changé (nouveaux PDF, nouveaux textes).
@@ -14,7 +15,6 @@ Usage :
     python main.py --steps topics         # seulement le topic modeling (optionnel)
     python main.py --steps segmentation equipment
     python main.py --steps topics --min-cluster-size 15
-    python main.py --steps report --summary llm   # synthèse rédigée par le LLM (un appel)
 """
 
 from __future__ import annotations
@@ -43,8 +43,6 @@ def main() -> None:
     parser.add_argument("--out-dir", type=Path, default=Path("outputs"))
     parser.add_argument("--min-cluster-size", type=int, default=topic_config.MIN_CLUSTER_SIZE,
                         help="taille minimale des clusters (étape topics uniquement)")
-    parser.add_argument("--summary", choices=["template", "llm"], default="template",
-                        help="synthèse du rapport : gabarit déterministe ou LLM (étape report uniquement)")
     args = parser.parse_args()
 
     os.chdir(Path(__file__).resolve().parent)  # chemins relatifs à la racine du repo
@@ -76,9 +74,7 @@ def main() -> None:
         elif step == "report":
             build_report(
                 seg_dir=args.out_dir / "segmentation",
-                eq_dir=args.out_dir / "equipment",
                 out_path=args.out_dir / "rapport_operationnel.html",
-                summary=args.summary,
             )
         print(f"-> étape {step} terminée en {time.time() - start:.0f} s")
 

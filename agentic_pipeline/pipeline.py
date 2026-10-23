@@ -51,11 +51,9 @@ REQUIRED_COLUMNS = [
 MERGED_COL = "merged_cluster_id"
 FINE_COL = "fine_cluster_id"
 SWEEP_COLUMNS = ["partition", "min_cluster_size", "n_clusters", "outlier_rate", "dbcv"]
-JSON_LIST_COLS = ["fine_cluster_ids", "prevented_outcomes", "recommendations", "early_warning_rules",
-                  "common_cause_quotes"]
+JSON_LIST_COLS = ["fine_cluster_ids", "recommendations", "common_cause_quotes"]
 DIAGNOSIS_KEYS = ["problem_title", "problem_description", "common_cause", "common_cause_quotes",
-                  "common_cause_source", "system_impact", "prevented_outcomes", "recommendations",
-                  "early_warning_rules", "nominal", "nominal_proposed", "nominal_reason",
+                  "common_cause_source", "recommendations", "nominal", "nominal_proposed", "nominal_reason",
                   "nominal_external_condition", "nominal_external_quote"]
 
 OUTLIER_DIAGNOSIS = {
@@ -64,12 +62,12 @@ OUTLIER_DIAGNOSIS = {
     "common_cause": "Non déterminée : ces incidents ne forment aucun groupe récurrent.",
     "common_cause_quotes": [],
     "common_cause_source": "",
-    "system_impact": "Non évalué.",
-    "prevented_outcomes": [],
     "recommendations": [
         {
             "action": "Maintien d'une veille opérationnelle et traitement au cas par cas.",
+            "verb": "",
             "component": "",
+            "detail": "",
             "scope": "fleet",
             "targets": [],
             "target_reason": {},
@@ -79,7 +77,6 @@ OUTLIER_DIAGNOSIS = {
             "critic_verdict": "fallback",
         }
     ],
-    "early_warning_rules": [],
     "nominal": False,
     "nominal_proposed": False,
     "nominal_reason": "",
@@ -328,7 +325,7 @@ def run_agentic_segmentation(
         members = df[df[MERGED_COL] == mid]
         ctx = build_diagnosis_context(
             mid, merged_members.get(mid, []), fine_titles, fine_cards, _merge_entry(mid, log),
-            conc, pairs, evidence, {k2: (v.item() if hasattr(v, "item") else v) for k2, v in impact.items()},
+            conc, {k2: (v.item() if hasattr(v, "item") else v) for k2, v in impact.items()},
             member_texts=members[TEXT_COL].astype(str).tolist(),
             mild_share=float((members[SEVERITY_COL] == SEVERITY_ORDER[0]).mean()),
             escalations=escalations_df,
@@ -426,8 +423,6 @@ def run_agentic_segmentation(
         print(f"[{str(row['criticality_tier']).upper()}] Rang {row['criticality_rank']} | {row[MERGED_COL]} : {row['problem_title']}")
         print(f"    Impact : {row['frequency']} incidents | Coût total : {row['total_cost_eur']:,.2f} € "
               f"(Moyenne : {row['mean_cost_eur']:,.2f} €) | Arrêt total : {row['total_downtime_hours']:.1f} h")
-        outs = row["prevented_outcomes"]
-        print(f"    Défaillances évitées : {'; '.join(outs) if outs else 'n/a'}")
         recs = row["recommendations"]
         print(f"    Première recommandation : {recs[0]['action'] if recs else 'n/a'}")
         print("-" * 90)

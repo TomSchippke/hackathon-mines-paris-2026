@@ -28,8 +28,7 @@ EXPECTED_COLUMNS = {
                         "criticality_tier", "frequency", "mean_cost_eur", "total_cost_eur",
                         "mean_downtime_hours", "total_downtime_hours", "problem_title",
                         "problem_description", "common_cause", "common_cause_quotes",
-                        "common_cause_source", "system_impact", "prevented_outcomes",
-                        "recommendations", "early_warning_rules", "nominal", "nominal_reason", "nominal_external_condition",
+                        "common_cause_source", "recommendations", "nominal", "nominal_reason", "nominal_external_condition",
                         "nominal_external_quote"],
     "concentration": ["merged_cluster_id", "dimension", "value", "observed", "expected", "lift",
                       "p_value", "q_value", "significant"],
@@ -83,15 +82,13 @@ class FakeLLM:
             return {"protection_only": True, "defect_found": False, "reason": "test"}
         if cache_tag == "cause_retry":
             return {"common_cause": "cause déduite", "quotes": ["citation inventée absente des rapports"]}
-        if cache_tag == "recommendation_critic":
+        if cache_tag == "action_retry":
             return {"recommendations": []}
-        if cache_tag == "diagnosis_v4":
+        if cache_tag == "diagnosis_v5":
             return {"problem_title": f"Diagnostic {h}", "problem_description": "desc", "common_cause": "cause",
-                    "system_impact": "impact", "prevented_outcomes": ["arrêt machine"],
                     "common_cause_quotes": ["citation inventée absente des rapports"],
-                    "recommendations": [{"action": "Inspecter", "scope": "equipment", "targets": ["EQUIP-INVENTE"],
-                                         "rationale": "r"}],
-                    "early_warning_rules": [{"rule_id": "inventé", "rule": "x", "action": "y"}]}
+                    "recommendations": [{"verbe": "Inspecter", "composant": "composant inventé xyz",
+                                         "scope": "equipment", "targets": ["EQUIP-INVENTE"], "rationale": "r"}]}
         raise AssertionError(f"cache_tag inattendu : {cache_tag}")
 
 
@@ -151,7 +148,7 @@ def test_pipeline_smoke(sample_csv, tmp_path, monkeypatch, no_llm):
     assert set(seg["assignment_source"]) <= {"dense_cluster", "merged_singleton", "unclassified_outlier"}
     merged = pd.read_csv(paths["clusters_merged"])
     assert set(seg["merged_cluster_id"]) == set(merged["merged_cluster_id"])
-    for c in ("prevented_outcomes", "recommendations", "early_warning_rules", "fine_cluster_ids"):
+    for c in ("recommendations", "fine_cluster_ids"):
         assert all(isinstance(json.loads(v), list) for v in merged[c])
     # cibles inventées filtrées par la validation du diagnostic ; citation inventée : cause inférée
     diagnosed = merged[merged["merged_cluster_id"] != "isole_atypique"]
@@ -171,4 +168,4 @@ def test_pipeline_smoke(sample_csv, tmp_path, monkeypatch, no_llm):
     esc = pd.read_csv(paths["escalations"])
     assert list(esc.columns) == ESCALATION_COLUMNS
     assert "isole_atypique" in set(seg["merged_cluster_id"])
-    assert llm.calls.get("fine_label", 0) > 0 and llm.calls.get("diagnosis_v4", 0) > 0
+    assert llm.calls.get("fine_label", 0) > 0 and llm.calls.get("diagnosis_v5", 0) > 0

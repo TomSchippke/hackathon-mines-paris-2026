@@ -1,4 +1,4 @@
-"""Rapport opérationnel HTML statique : plan d'action par voie de remédiation."""
+"""Rapport opérationnel HTML statique : actions ciblées, programmes flotte et page méthode."""
 
 __all__ = ["build_report"]
 

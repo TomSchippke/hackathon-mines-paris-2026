@@ -1,13 +1,16 @@
 """Assemblage du rapport opérationnel : chargement des sorties, contexte (dicts simples), rendu Jinja2.
 
 Entrées : `outputs/segmentation/` (incidents segmentés, clusters fins et fusionnés, concentrations,
-escalades, précurseurs), `outputs/equipment/equipment_summary.csv` et, s'il existe,
-`outputs/diagnostics/umap_stability.csv`. Sortie : un fichier HTML autonome (aucune ressource externe,
-aucun JavaScript) et une page annexe avec la synthèse non retenue (`rapport_synthese_alt.html`).
+escalades, précurseurs) et, s'il existe, `outputs/diagnostics/umap_stability.csv`. Sorties : deux pages
+HTML autonomes (aucune ressource externe, aucun JavaScript) :
 
-Le cluster fusionné (« voie de remédiation ») porte l'action : le plan liste les voies non nominales
-(hors isolés) par coût total, avec leurs actions numérotées A1..An dans l'ordre du diagnostic
-(escalade, ciblée, flotte) et, pour chacune, ses preuves (citations, concentrations, séries).
+- `rapport_operationnel.html` (exploitation) : actions ciblées (une ligne par équipement ou site,
+  classées par le coût des incidents de cette cible), programmes flotte (classés par le coût du groupe),
+  fiches de preuves par groupe, groupes sans action requise ;
+- `methode.html` (jury) : construction, vue flotte, qualité des actions mesurée par le code,
+  résultats négatifs et limites.
+
+Les actions sont numérotées A1..An dans l'ordre de lecture : actions ciblées, puis programmes flotte.
 """
 
 from __future__ import annotations
@@ -30,33 +33,32 @@ from agentic_pipeline.config import (
 from agentic_pipeline.diagnosis import quote_found, simplify
 
 from . import charts, formatting
-from .summary import llm_summary, template_summary
 
 DEFAULT_SEG_DIR = Path("outputs/segmentation")
-DEFAULT_EQ_DIR = Path("outputs/equipment")
-DEFAULT_DIAG_DIR = Path("outputs/diagnostics")
 DEFAULT_OUT = Path("outputs/rapport_operationnel.html")
-ALT_NAME = "rapport_synthese_alt.html"
+METHOD_NAME = "methode.html"
 TEMPLATE_DIR = Path(__file__).parent / "templates"
 
-N_OPEN_VOIES = 5  # voies dépliées par défaut
 MAX_QUOTE_INCIDENTS = 6  # incidents affichés par citation
 MAX_REPRESENTATIVES = 5
-N_TOP_EQUIPMENT = 5
 TIER_ORDER = ["Critique", "Élevée", "Moyenne", "Faible"]
 SCOPE_LABELS = {"fleet": "flotte", "site": "site", "equipment": "équipement"}
 PARTITION_LABELS = {"solar": "solaire", "wind": "éolien"}
+FLEET_NOUNS = {"solar": "installations photovoltaïques", "wind": "éoliennes"}
+URGENCY_ESCALATION = "agir avant la prochaine occurrence"
 # Colonnes listes JSON de clusters_merged.csv (comme pipeline.JSON_LIST_COLS, sans importer UMAP/HDBSCAN)
-JSON_LIST_COLS = ["fine_cluster_ids", "prevented_outcomes", "recommendations", "early_warning_rules",
-                  "common_cause_quotes"]
+JSON_LIST_COLS = ["fine_cluster_ids", "recommendations", "common_cause_quotes"]
 BADGES = {
     "escalade": "escalade",
     "concentration": "concentration",
     "verifier": "à vérifier",
     "inferee": "cause inférée – à confirmer",
-    "nonverifie": "non vérifié par le critique",
     "defaut": "action par défaut",
+    "veille": "ajoutée par le code",
 }
+# Série en escalade qu'aucune action du groupe ne vise : action de veille ajoutée par le code
+WATCH_ACTION = {"verb": "Inspecter", "component": "l'équipement", "detail": "série en escalade sans action proposée",
+                "scope": "equipment", "critic_verdict": "veille"}
 
 
 # --------------------------------------------------------------------------- chargement
@@ -93,9 +95,9 @@ def _read(path: Path, required: bool = True, **kwargs) -> pd.DataFrame:
     return pd.read_csv(path, **kwargs)
 
 
-def load_outputs(seg_dir: Path, eq_dir: Path, diag_dir: Path | None = None) -> dict[str, pd.DataFrame]:
+def load_outputs(seg_dir: Path, diag_dir: Path | None = None) -> dict[str, pd.DataFrame]:
     """Charge les sorties du pipeline ; les colonnes listes JSON de clusters_merged sont décodées."""
-    seg_dir, eq_dir = Path(seg_dir), Path(eq_dir)
+    seg_dir = Path(seg_dir)
     diag_dir = Path(diag_dir) if diag_dir is not None else seg_dir.parent / "diagnostics"
     ids = {ID_COL: str}
     merged = _read(seg_dir / "clusters_merged.csv")
@@ -110,7 +112,6 @@ def load_outputs(seg_dir: Path, eq_dir: Path, diag_dir: Path | None = None) -> d
         "escalations": _read(seg_dir / "escalations.csv", required=False,
                              dtype={"incident_ids": str, "costs": str, "equipment_id": str}),
         "pairs": _read(seg_dir / "precursor_pairs.csv", required=False),
-        "equipment": _read(eq_dir / "equipment_summary.csv", required=False),
         "umap": _read(diag_dir / "umap_stability.csv", required=False),
     }
 
@@ -198,7 +199,9 @@ def _concentration_target(conc: pd.DataFrame, voie_id: str, scope: str, value: s
             "level": _s(r["evidence_level"])}
 
 
-def _action(rec: dict, aid: str, voie: dict, data: dict, incidents: Incidents) -> dict:
+def _action(rec: dict, voie: dict, data: dict, incidents: Incidents) -> dict:
+    """Action d'une voie : texte (verbe, composant, détail), cibles avec leurs preuves, badges.
+    L'identifiant A1..An est attribué plus tard, dans l'ordre de lecture du rapport."""
     reasons = rec.get("target_reason") or {}
     to_verify = set(rec.get("targets_to_verify") or [])
     scope = rec.get("scope") or "fleet"
@@ -206,7 +209,7 @@ def _action(rec: dict, aid: str, voie: dict, data: dict, incidents: Incidents) -
     for t in rec.get("targets") or []:
         reason = reasons.get(t, "")
         targets.append({
-            "name": t, "to_verify": t in to_verify,
+            "name": t, "to_verify": t in to_verify, "escalation": reason in ("escalation", "both"),
             "esc": (_escalation_target(data["escalations"], voie["id"], t, incidents)
                     if reason in ("escalation", "both") else None),
             "conc": (_concentration_target(data["concentration"], voie["id"], scope, t)
@@ -222,25 +225,31 @@ def _action(rec: dict, aid: str, voie: dict, data: dict, incidents: Incidents) -
         badges.append("verifier")
     if rec.get("confirm_cause_first") or voie["cause_source"] == "inferee":
         badges.append("inferee")
-    if rec.get("critic_verdict") == "non_verifie":
-        badges.append("nonverifie")
     if rec.get("critic_verdict") == "fallback":
         badges.append("defaut")
-    text = _s(rec.get("action"))
+    if rec.get("critic_verdict") == "veille":
+        badges.append("veille")
+    verb, component = _s(rec.get("verb")), _s(rec.get("component"))
+    if not verb:  # action par défaut : phrase complète, sans champs
+        text = _s(rec.get("action"))
+        verb, component = text[:1].upper() + text[1:], ""
     return {
-        "id": aid, "text": text[:1].upper() + text[1:], "component": _s(rec.get("component")),
+        "id": "", "verb": verb[:1].upper() + verb[1:], "component": component, "detail": _s(rec.get("detail")),
         "scope": scope, "scope_label": SCOPE_LABELS.get(scope, scope), "targets": targets,
-        "rationale": _s(rec.get("rationale")),
+        "escalation": any(t["escalation"] for t in targets), "verdict": _s(rec.get("critic_verdict")),
         "badges": [{"slug": b, "label": BADGES[b]} for b in badges],
+        "voie_id": voie["id"], "voie_title": voie["title"], "voie_anchor": voie["anchor"],
     }
 
 
 def _voie_base(row: dict, fleet_cost: float) -> dict:
     tier = _s(row.get("criticality_tier"))
+    partition = _s(row.get("partition"))
     return {
         "id": str(row["merged_cluster_id"]), "anchor": f"voie-{row['merged_cluster_id']}",
         "rank": int(row["criticality_rank"]), "title": _s(row.get("problem_title")) or str(row["merged_cluster_id"]),
-        "tier": tier, "tier_slug": _slug(tier), "partition": PARTITION_LABELS.get(_s(row.get("partition")), _s(row.get("partition"))),
+        "tier": tier, "tier_slug": _slug(tier), "partition": PARTITION_LABELS.get(partition, partition),
+        "fleet_noun": FLEET_NOUNS.get(partition, "équipements"),
         "frequency": int(row["frequency"]), "total_cost": float(row["total_cost_eur"]),
         "mean_cost": float(row["mean_cost_eur"]), "downtime": float(row["total_downtime_hours"]),
         "cost_share": float(row["total_cost_eur"]) / fleet_cost if fleet_cost else 0.0,
@@ -248,7 +257,8 @@ def _voie_base(row: dict, fleet_cost: float) -> dict:
     }
 
 
-def _plan_voie(row: dict, data: dict, incidents: Incidents, fleet_cost: float, first_action: int) -> dict:
+def _voie(row: dict, data: dict, incidents: Incidents, fleet_cost: float) -> dict:
+    """Fiche de preuves d'un groupe du plan, avec ses actions (non numérotées)."""
     v = _voie_base(row, fleet_cost)
     inc = data["incidents"]
     members = inc[inc["merged_cluster_id"] == v["id"]]
@@ -262,13 +272,23 @@ def _plan_voie(row: dict, data: dict, incidents: Incidents, fleet_cost: float, f
     v.update(
         description=_s(row.get("problem_description")), cause=_s(row.get("common_cause")),
         quotes=[_quote_refs(q, members, incidents) for q in row["common_cause_quotes"] if _s(q)],
-        impact=_s(row.get("system_impact")),
-        outcomes=[_s(o) for o in row["prevented_outcomes"] if _s(o)],
         fine=fine_list, representatives=[incidents.get(u) for u in reps],
-        warning_rules=[r for r in row["early_warning_rules"] if isinstance(r, dict)],
     )
-    v["actions"] = [_action(r, f"A{first_action + k}", v, data, incidents)
-                    for k, r in enumerate(row["recommendations"]) if isinstance(r, dict)]
+    recs = [r for r in row["recommendations"] if isinstance(r, dict)]
+    targeted = {t for r in recs for t in r.get("targets") or []}
+    esc = data["escalations"]
+    series = esc.loc[esc["merged_cluster_id"] == v["id"], "equipment_id"].astype(str) if len(esc) else []
+    recs += [{**WATCH_ACTION, "targets": [e], "target_reason": {e: "escalation"}}
+             for e in dict.fromkeys(series) if e not in targeted]
+    v["actions"] = [_action(r, v, data, incidents) for r in recs]
+    # Preuves par cible (une fois par cible, même si plusieurs actions la visent)
+    evidence: dict[str, dict] = {}
+    for a in v["actions"]:
+        for t in a["targets"]:
+            e = evidence.setdefault(t["name"], {"name": t["name"], "esc": None, "conc": None})
+            e["esc"] = e["esc"] or t["esc"]
+            e["conc"] = e["conc"] or t["conc"]
+    v["evidence"] = [e for e in evidence.values() if e["esc"] or e["conc"]]
     return v
 
 
@@ -283,41 +303,94 @@ def _nominal_voie(row: dict, data: dict, incidents: Incidents, fleet_cost: float
     return v
 
 
-# --------------------------------------------------------------------------- contexte
+# --------------------------------------------------------------------------- tableaux d'actions
 
 
-def _fleet(data: dict, plan_ids: set[str], fleet_cost: float) -> dict:
+def _target_rows(plan: list[dict], inc: pd.DataFrame) -> list[dict]:
+    """Une ligne par cible (équipement ou site) avec ses actions, toutes voies confondues. Coût de la
+    ligne : coût des incidents de la cible dans chacune de ses voies (chaque voie comptée une fois)."""
+    rows: dict[tuple[str, str], dict] = {}
+    for v in plan:
+        members = inc[inc["merged_cluster_id"] == v["id"]]
+        for a in v["actions"]:
+            for t in a["targets"]:
+                key = (a["scope"], t["name"])
+                col = EQUIPMENT_COL if a["scope"] == "equipment" else "site"
+                own = members[members[col].astype(str) == t["name"]]
+                row = rows.setdefault(key, {
+                    "name": t["name"], "kind": SCOPE_LABELS.get(a["scope"], a["scope"]), "site": "",
+                    "voies": {}, "actions": [], "escalation": False, "to_verify": False})
+                if a["scope"] == "equipment" and not row["site"]:
+                    sites = inc.loc[inc[EQUIPMENT_COL].astype(str) == t["name"], "site"]
+                    row["site"] = _s(sites.iloc[0]) if len(sites) else ""
+                row["voies"][v["id"]] = (float(own[COST_COL].sum()), len(own))
+                row["escalation"] |= t["escalation"]
+                row["to_verify"] |= t["to_verify"]
+                row["actions"].append({"action": a, "target": t, "cost": float(own[COST_COL].sum()),
+                                       "n": len(own)})
+    out = []
+    for row in rows.values():
+        row["cost"] = sum(c for c, _ in row["voies"].values())
+        row["n"] = sum(n for _, n in row["voies"].values())
+        row["actions"].sort(key=lambda x: (not x["target"]["escalation"], -x["cost"]))
+        out.append(row)
+    out.sort(key=lambda r: -r["cost"])
+    return out
+
+
+def _number_actions(target_rows: list[dict], fleet: list[dict]) -> int:
+    """Identifiants A1..An dans l'ordre de lecture : actions ciblées, puis programmes flotte."""
+    n = 0
+    for occ in [x for r in target_rows for x in r["actions"]] + [{"action": a} for a in fleet]:
+        a = occ["action"]
+        if not a["id"]:
+            n += 1
+            a["id"] = f"A{n}"
+            occ["anchor"] = True  # ancre HTML sur la première occurrence (une action peut viser plusieurs cibles)
+    return n
+
+
+# --------------------------------------------------------------------------- page méthode
+
+
+def _fleet_charts(data: dict, fleet_cost: float, main_name: str) -> dict:
     merged = data["merged"].sort_values("criticality_rank")
+    nominal = merged["nominal"].map(_truthy)
     rows, cum = [], 0.0
-    for r in merged.to_dict("records"):
+    for r, is_nom in zip(merged.to_dict("records"), nominal):
         cum += float(r["total_cost_eur"])
         tier = _s(r["criticality_tier"])
         mid = str(r["merged_cluster_id"])
+        anchor = "sans-action" if is_nom or mid == OUTLIER_LABEL else f"voie-{mid}"
         rows.append({"title": _s(r["problem_title"]) or mid, "cost": float(r["total_cost_eur"]),
                      "cum_share": cum / fleet_cost if fleet_cost else 0.0, "tier": tier, "tier_slug": _slug(tier),
-                     "href": f"#voie-{mid}" if mid in plan_ids else "#sans-action"})
+                     "href": f"{main_name}#{anchor}"})
     inc = data["incidents"]
     groups = sorted(inc[PARTITION_COL].astype(str).unique())
     by_site = (inc.groupby(["site", PARTITION_COL]).agg(cost=(COST_COL, "sum"), n=(ID_COL, "size"))
                .reset_index().sort_values("cost", ascending=False))
     site_rows = [{"site": r["site"], "group": str(r[PARTITION_COL]), "cost": float(r["cost"]), "n": int(r["n"])}
                  for r in by_site.to_dict("records")]
-    eq = data["equipment"]
-    top_eq = []
-    if len(eq) and "bad_actor_score" in eq:
-        for r in eq.sort_values("bad_actor_score", ascending=False).head(N_TOP_EQUIPMENT).to_dict("records"):
-            top_eq.append({"id": _s(r["equipment_id"]), "site": _s(r.get("site")), "n": int(r["total_incidents"]),
-                           "cost": float(r["total_cost_eur"]), "downtime": float(r["total_downtime_hours"]),
-                           "mtbf": r.get("mtbf_days"), "score": r.get("bad_actor_score"),
-                           "problem": _s(r.get("most_frequent_problem"))})
     tiers = [{"label": t, "slug": _slug(t)} for t in TIER_ORDER if t in set(merged["criticality_tier"].astype(str))]
     return {"pareto_svg": charts.pareto_svg(rows), "site_svg": charts.site_svg(site_rows, groups),
             "groups": [{"label": PARTITION_LABELS.get(g, g), "cat": i + 1} for i, g in enumerate(groups)],
-            "tiers": tiers, "top_equipment": top_eq}
+            "tiers": tiers}
+
+
+def _quality(plan: list[dict]) -> dict:
+    """Qualité des actions et des causes des groupes du plan, mesurée par le code (aucun jugement LLM)."""
+    verdicts = [a["verdict"] for v in plan for a in v["actions"]]
+    n = len(verdicts) - verdicts.count("veille")
+    src = [v["cause_source"] for v in plan]
+    return {"n_actions": n, "valide": verdicts.count("valide"), "corrigee": verdicts.count("corrigee"),
+            "watch": verdicts.count("veille"),
+            "fallback": verdicts.count("fallback"),
+            "fallback_share": verdicts.count("fallback") / n if n else 0.0,
+            "n_groups": len(plan), "cause_cited": src.count("citee"), "cause_inferred": src.count("inferee")}
 
 
 def _method(data: dict, n_voies: int) -> dict:
-    """Chiffres de la section « Méthode et limites », tous calculés depuis les sorties."""
+    """Chiffres de la page méthode, tous calculés depuis les sorties."""
     fine, merged, pairs, conc, umap = data["fine"], data["merged"], data["pairs"], data["concentration"], data["umap"]
     m: dict[str, Any] = {
         "n_fine": int((fine["size"] > 1).sum()) if len(fine) else 0,
@@ -342,14 +415,16 @@ def _method(data: dict, n_voies: int) -> dict:
                      for p, g in umap.groupby("partition")]
     m["nominal_accepted"] = int(merged["nominal"].map(_truthy).sum())
     m["nominal_rejected"] = int((merged["nominal_proposed"].map(_truthy) & ~merged["nominal"].map(_truthy)).sum())
-    m["cause_inferred"] = int((merged["common_cause_source"].astype(str) == "inferee").sum())
     load_dotenv(find_dotenv(usecwd=True))
     m["model"] = os.environ.get("AZURE_OPENAI_CHAT_DEPLOYMENT", "")
     return m
 
 
+# --------------------------------------------------------------------------- contexte
+
+
 def build_context(data: dict, out_path: Path, root: Path) -> dict:
-    """Contexte du gabarit (dicts et listes simples, plus les SVG déjà rendus)."""
+    """Contexte des deux gabarits (dicts et listes simples, plus les SVG déjà rendus)."""
     inc = data["incidents"].copy()
     inc[COST_COL] = pd.to_numeric(inc[COST_COL], errors="coerce").fillna(0.0)
     inc[DOWNTIME_COL] = pd.to_numeric(inc[DOWNTIME_COL], errors="coerce").fillna(0.0)
@@ -360,13 +435,17 @@ def build_context(data: dict, out_path: Path, root: Path) -> dict:
     is_nominal = merged["nominal"].map(_truthy)
     is_outlier = merged["merged_cluster_id"] == OUTLIER_LABEL
 
-    plan, n_actions = [], 0
-    for row in merged[~is_nominal & ~is_outlier].to_dict("records"):
-        v = _plan_voie(row, data, incidents, fleet_cost, n_actions + 1)
-        v["rank"] = len(plan) + 1  # numérotation continue : les groupes sans action sont hors du plan
-        v["open"] = len(plan) < N_OPEN_VOIES
-        n_actions += len(v["actions"])
-        plan.append(v)
+    plan = [_voie(r, data, incidents, fleet_cost) for r in merged[~is_nominal & ~is_outlier].to_dict("records")]
+    targets = _target_rows(plan, inc)
+    fleet = [a for v in plan for a in v["actions"] if a["scope"] == "fleet"]  # plan déjà trié par coût du groupe
+    voie_by_id = {v["id"]: v for v in plan}
+    for a in fleet:
+        v = voie_by_id[a["voie_id"]]
+        a.update(cost=v["total_cost"], cost_share=v["cost_share"], tier=v["tier"], tier_slug=v["tier_slug"],
+                 fleet_noun=v["fleet_noun"])
+    n_actions = _number_actions(targets, fleet)
+    for v in plan:
+        v["action_ids"] = [a["id"] for a in v["actions"] if a["id"]]
 
     nominal = [_nominal_voie(r, data, incidents, fleet_cost) for r in merged[is_nominal & ~is_outlier].to_dict("records")]
     iso = inc[inc["merged_cluster_id"] == OUTLIER_LABEL].sort_values(COST_COL, ascending=False)
@@ -375,19 +454,7 @@ def build_context(data: dict, out_path: Path, root: Path) -> dict:
     no_action = {"nominal": nominal, "isolated": isolated,
                  "total_cost": sum(v["total_cost"] for v in nominal) + isolated["cost"]}
 
-    # Actions d'escalade, classées par coût de la série (pour la synthèse)
-    esc_actions = []
-    for v in plan:
-        for a in v["actions"]:
-            series = [t for t in a["targets"] if t["esc"]]
-            if series:
-                t = max(series, key=lambda t: t["esc"]["total_cost"])
-                esc_actions.append({"action_id": a["id"], "equipment": t["name"], "voie_title": v["title"],
-                                    "sequence": t["esc"]["sequence"], "series_cost": t["esc"]["total_cost"]})
-    esc_actions.sort(key=lambda e: -e["series_cost"])
-
     dates = pd.to_datetime(inc[DATE_COL], errors="coerce")
-    plan_cost = sum(v["total_cost"] for v in plan)
     header = {
         "n_incidents": len(inc), "date_min": formatting.date_fr(dates.min()), "date_max": formatting.date_fr(dates.max()),
         "sites": sorted(inc["site"].astype(str).unique()),
@@ -398,11 +465,11 @@ def build_context(data: dict, out_path: Path, root: Path) -> dict:
         "generated": datetime.now().strftime("%d/%m/%Y à %H:%M"),
     }
     return {
-        "header": header, "plan": plan, "n_actions": n_actions, "plan_cost": plan_cost,
-        "plan_share": plan_cost / fleet_cost if fleet_cost else 0.0,
-        "no_action": no_action, "escalation_actions": esc_actions,
-        "fleet": _fleet(data, {v["id"] for v in plan}, fleet_cost),
-        "method": _method(data, len(plan)),
+        "header": header, "targets": targets, "fleet": fleet, "plan": plan, "n_actions": n_actions,
+        "targets_cost": sum(r["cost"] for r in targets), "no_action": no_action,
+        "urgency_escalation": URGENCY_ESCALATION, "main_name": out_path.name, "method_name": METHOD_NAME,
+        "charts": _fleet_charts(data, fleet_cost, out_path.name),
+        "quality": _quality(plan), "method": _method(data, len(plan)),
     }
 
 
@@ -418,55 +485,36 @@ def _environment() -> Environment:
     return env
 
 
-def render(ctx: dict, alt: bool = False) -> str:
-    return _environment().get_template("rapport.html.j2").render(**ctx, alt_only=alt)
+def render(ctx: dict, template: str = "rapport.html.j2") -> str:
+    return _environment().get_template(template).render(**ctx)
 
 
 def build_report(
     seg_dir: Path | str = DEFAULT_SEG_DIR,
-    eq_dir: Path | str = DEFAULT_EQ_DIR,
     out_path: Path | str = DEFAULT_OUT,
-    summary: str = "template",
-    llm: Callable[..., Any] | None = None,
     root: Path | str | None = None,
     diag_dir: Path | str | None = None,
 ) -> Path:
-    """Écrit le rapport (`out_path`) et la synthèse non retenue (`rapport_synthese_alt.html` à côté).
-
-    `summary` : « template » (déterministe) ou « llm » (un appel, validé, repli sur le gabarit).
-    En mode « template », la synthèse LLM de la page annexe est lue dans le cache (aucun appel
-    réseau), sauf si `llm` est fourni. `root` : racine à laquelle `document_path` est relatif
-    (défaut : répertoire courant).
-    """
-    if summary not in ("template", "llm"):
-        raise ValueError(f"summary doit valoir « template » ou « llm », pas {summary!r}.")
+    """Écrit le rapport (`out_path`) et la page méthode (`methode.html` à côté). `root` : racine à
+    laquelle `document_path` est relatif (défaut : répertoire courant)."""
     out_path = Path(out_path)
     root = Path(root) if root is not None else Path.cwd()
-    data = load_outputs(Path(seg_dir), Path(eq_dir), diag_dir)
+    data = load_outputs(Path(seg_dir), diag_dir)
     ctx = build_context(data, out_path, root)
-    tpl = template_summary(ctx)
-    if summary == "llm":
-        main_sum, alt_sum = llm_summary(ctx, llm=llm), tpl
-    else:
-        main_sum, alt_sum = tpl, llm_summary(ctx, llm=llm, cache_only=llm is None)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(render({**ctx, "summary": main_sum}), encoding="utf-8")
-    alt_path = out_path.parent / ALT_NAME
-    alt_path.write_text(render({**ctx, "summary": alt_sum, "main_name": out_path.name}, alt=True), encoding="utf-8")
-    print(f"   [OK] Rapport : {out_path} ({out_path.stat().st_size / 1024:.0f} Ko), synthèse "
-          f"{main_sum['kind']} ; synthèse alternative ({alt_sum['kind']}) : {alt_path}")
+    out_path.write_text(render(ctx), encoding="utf-8")
+    method_path = out_path.parent / METHOD_NAME
+    method_path.write_text(render(ctx, "methode.html.j2"), encoding="utf-8")
+    print(f"   [OK] Rapport : {out_path} ({out_path.stat().st_size / 1024:.0f} Ko) ; méthode : {method_path}")
     return out_path
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Rapport opérationnel HTML statique")
     parser.add_argument("--seg-dir", type=Path, default=DEFAULT_SEG_DIR, help="Sorties de la segmentation")
-    parser.add_argument("--eq-dir", type=Path, default=DEFAULT_EQ_DIR, help="Sorties de l'analyse par équipement")
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT, help="Fichier HTML produit")
-    parser.add_argument("--summary", choices=["template", "llm"], default="template",
-                        help="synthèse déterministe (défaut) ou rédigée par le LLM (un appel)")
     args = parser.parse_args()
-    build_report(args.seg_dir, args.eq_dir, args.out, summary=args.summary)
+    build_report(args.seg_dir, args.out)
 
 
 if __name__ == "__main__":
