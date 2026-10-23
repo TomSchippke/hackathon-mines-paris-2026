@@ -243,3 +243,22 @@ def test_every_escalation_series_gets_a_row(fixture_dirs, no_llm):
     assert "<svg" in _section(html, "preuves")  # la frise reste dans la fiche
     quality = _section(_method(fixture_dirs), "qualite")
     assert "1 série en escalade" in quality and "1</b><span>acceptées du premier coup" in quality
+
+
+def test_watch_inspections_merged_per_machine(fixture_dirs, no_llm):
+    seg = fixture_dirs["seg"]
+    merged = pd.read_csv(seg / "clusters_merged.csv")
+    recs = json.loads(merged.loc[0, "recommendations"])
+    merged.loc[0, "recommendations"] = json.dumps(recs[1:], ensure_ascii=False)  # plus d'action sur WTG01
+    merged.to_csv(seg / "clusters_merged.csv", index=False)
+    esc = pd.read_csv(seg / "escalations.csv")
+    second = esc.iloc[0].copy()
+    second["merged_cluster_id"], second["incident_ids"] = "wind_M1", "4;5"
+    pd.concat([esc, second.to_frame().T]).to_csv(seg / "escalations.csv", index=False)
+    html = _build(fixture_dirs)
+    row = _section(html, "ciblees").split('<span class="target">WTG01</span>')[1].split("</tr>")[0]
+    assert row.count("<b>Inspecter</b>") == 1
+    assert "#voie-wind_M0" in row and "#voie-wind_M1" in row
+    aid = re.search(r'<span class="aid">(A\d+)</span> <span class="act"><b>Inspecter', row).group(1)
+    proofs = _section(html, "preuves")
+    assert proofs.count(f'href="#{aid}"') == 2  # les deux fiches renvoient à la même ligne

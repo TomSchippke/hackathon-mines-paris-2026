@@ -49,8 +49,8 @@
           <li{% if x.anchor %} id="{{ a.id }}"{% endif %}><span class="aid">{{ a.id }}</span> {{ action_text(a) }}
             <div class="act-meta">
               {% if x.target.escalation %}<span class="urgent">{{ urgency_escalation }}</span>{% endif %}
-              <a href="#{{ a.voie_anchor }}">{{ a.voie_title }}</a>
-              <span class="num">{{ x.n }} incident{% if x.n > 1 %}s{% endif %}, {{ x.cost|eur }}</span>
+              {% for g in x.groups %}<a href="#{{ g.anchor }}">{{ g.title }}</a>
+              <span class="num">{{ g.n }} incident{% if g.n > 1 %}s{% endif %}, {{ g.cost|eur }}</span>{% endfor %}
               {{ badges(a) }}
             </div></li>
           {% endfor %}

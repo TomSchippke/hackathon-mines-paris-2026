@@ -327,12 +327,22 @@ def _target_rows(plan: list[dict], inc: pd.DataFrame) -> list[dict]:
                 row["escalation"] |= t["escalation"]
                 row["to_verify"] |= t["to_verify"]
                 row["actions"].append({"action": a, "target": t, "cost": float(own[COST_COL].sum()),
-                                       "n": len(own)})
+                                       "n": len(own), "same": [],
+                                       "groups": [{"title": v["title"], "anchor": v["anchor"],
+                                                   "n": len(own), "cost": float(own[COST_COL].sum())}]})
     out = []
     for row in rows.values():
         row["cost"] = sum(c for c, _ in row["voies"].values())
         row["n"] = sum(n for _, n in row["voies"].values())
         row["actions"].sort(key=lambda x: (not x["target"]["escalation"], -x["cost"]))
+        # Inspections de veille d'une même machine (une par groupe) : une seule ligne, groupes listés
+        watch = [x for x in row["actions"] if x["action"]["verdict"] == "veille"]
+        for x in watch[1:]:
+            watch[0]["groups"] += x["groups"]
+            watch[0]["same"].append(x["action"])
+            watch[0]["cost"] += x["cost"]
+            watch[0]["n"] += x["n"]
+        row["actions"] = [x for x in row["actions"] if x not in watch[1:]]
         out.append(row)
     out.sort(key=lambda r: -r["cost"])
     return out
@@ -347,6 +357,8 @@ def _number_actions(target_rows: list[dict], fleet: list[dict]) -> int:
             n += 1
             a["id"] = f"A{n}"
             occ["anchor"] = True  # ancre HTML sur la première occurrence (une action peut viser plusieurs cibles)
+        for same in occ.get("same", []):  # inspections fusionnées : même identifiant pour chaque groupe
+            same["id"] = a["id"]
     return n
 
 
